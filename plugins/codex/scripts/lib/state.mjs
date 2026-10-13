@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { atomicWrite, processAlive, withFileLock } from "./storage.mjs";
+import { atomicWrite, processAlive, readTextFile, withFileLock } from "./storage.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
@@ -44,7 +44,7 @@ function validId(id) {
 export function resolveJobFile(cwd, id) { return path.join(resolveJobsDir(cwd), `${validId(id)}.json`); }
 export function resolveJobLogFile(cwd, id) { ensureStateDir(cwd); return path.join(resolveJobsDir(cwd), `${validId(id)}.log`); }
 function readOptional(file) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+  try { return JSON.parse(readTextFile(file)); }
   catch (error) { if (error.code === "ENOENT") return null; throw new Error(`Cannot read state ${file}: ${error.message}`); }
 }
 function mergeJob(existing, patch) {
@@ -133,7 +133,7 @@ export const generateJobId = (prefix = "job") => `${prefix}-${randomUUID()}`;
 export function writeJobFile(cwd, id, payload) {
   updateJob(cwd, id, existing => ({ ...existing, ...payload })); return resolveJobFile(cwd, id);
 }
-export const readJobFile = file => JSON.parse(fs.readFileSync(file, "utf8"));
+export const readJobFile = file => JSON.parse(readTextFile(file));
 export function requestJobCancellation(cwd, id, reason = "Cancelled by user.") {
   return updateJob(cwd, id, job => ({ ...job, cancelRequestedAt: now(), cancelReason: reason }));
 }

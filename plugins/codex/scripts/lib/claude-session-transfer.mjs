@@ -32,9 +32,15 @@ export function resolveClaudeSessionPath(cwd, options = {}) {
   let projects;
   try {
     source = fs.realpathSync(sourcePath);
-    projects = fs.realpathSync(CLAUDE_PROJECTS_DIR);
   } catch {
     throw new Error(`Claude session file not found: ${sourcePath}`);
+  }
+  try { projects = fs.realpathSync(CLAUDE_PROJECTS_DIR); }
+  catch (error) {
+    if (error.code !== "ENOENT") throw new Error(`Cannot resolve the allowed Claude projects directory: ${error.message}`);
+    // No valid source can be inside an absent directory. Still apply the
+    // containment check and report its actual failure, not a missing source.
+    projects = CLAUDE_PROJECTS_DIR;
   }
   const relative = path.relative(projects, source);
   if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {

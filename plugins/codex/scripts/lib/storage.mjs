@@ -16,6 +16,7 @@ function fileOperation(action) {
     }
   }
 }
+export const readTextFile = file => fileOperation(() => fs.readFileSync(file, "utf8"));
 
 export function atomicWrite(file, content) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -44,7 +45,7 @@ export function withFileLock(lockDir, action, timeoutMs = 10000) {
   const scan = () => fs.readdirSync(lockDir).filter(name => name.endsWith(".json")).flatMap(name => {
     const file = path.join(lockDir, name);
     let ticket;
-    try { ticket = JSON.parse(fs.readFileSync(file, "utf8")); }
+    try { ticket = JSON.parse(readTextFile(file)); }
     catch (error) { if (error.code === "ENOENT") return []; throw error; }
     if (!Number.isInteger(ticket.pid) || ticket.pid <= 0 || typeof ticket.choosing !== "boolean" || !Number.isSafeInteger(ticket.number) || ticket.number < 0) {
       throw new Error(`Invalid state lock ticket: ${file}`);
