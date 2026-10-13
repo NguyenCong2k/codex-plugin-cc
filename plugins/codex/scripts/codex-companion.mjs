@@ -15,7 +15,6 @@ import {
     getCodexAvailability,
     getSessionRuntimeStatus,
     importExternalAgentSession,
-    interruptAppServerTurn,
     parseStructuredOutput,
     readOutputSchema,
     runAppServerReview,
@@ -24,7 +23,7 @@ import {
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
+import { binaryAvailable } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   generateJobId,
@@ -32,7 +31,10 @@ import {
   listJobs,
   setConfig,
   upsertJob,
-  writeJobFile
+  writeJobFile,
+  requestJobCancellation,
+  updateJob,
+  reconcileJobs
 } from "./lib/state.mjs";
 import {
   buildSingleJobSnapshot,
@@ -68,7 +70,6 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
@@ -119,11 +120,6 @@ function normalizeReasoningEffort(effort) {
   if (!normalized) {
     return null;
   }
-  if (!VALID_REASONING_EFFORTS.has(normalized)) {
-    throw new Error(
-      `Unsupported reasoning effort "${effort}". Use one of: none, minimal, low, medium, high, xhigh.`
-    );
-  }
   return normalized;
 }
 
@@ -133,13 +129,16 @@ function normalizeArgv(argv) {
     if (!raw || !raw.trim()) {
       return [];
     }
-    return splitRawArgumentString(raw);
+    return [raw];
   }
   return argv;
 }
 
 function parseCommandInput(argv, config = {}) {
-  return parseArgs(normalizeArgv(argv), {
+  const actual = argv[0] === "--arguments" && argv.length === 2 ? splitRawArgumentString(argv[1])
+    : argv[0] === "--arguments-file" && argv.length === 2 ? splitRawArgumentString(fs.readFileSync(argv[1], "utf8"))
+    : argv[0] === "--arguments-stdin" && argv.length === 1 ? splitRawArgumentString(readStdinIfPiped()) : normalizeArgv(argv);
+  return parseArgs(actual, {
     ...config,
     aliasMap: {
       C: "cwd",
@@ -168,7 +167,7 @@ function shorten(text, limit = 96) {
   if (normalized.length <= limit) {
     return normalized;
   }
-  return `${normalized.slice(0, limit - 3)}...`;
+  return `${Array.from(normalized).slice(0, limit - 3).join("")}...`;
 }
 
 function firstMeaningfulLine(text, fallback) {
@@ -205,7 +204,7 @@ async function buildSetupReport(cwd, actionsTaken = []) {
     npm: npmStatus,
     codex: codexStatus,
     auth: authStatus,
-    sessionRuntime: getSessionRuntimeStatus(process.env, workspaceRoot),
+    sessionRuntime: getSessionRuntimeStatus(),
     reviewGateEnabled: Boolean(config.stopReviewGate),
     actionsTaken,
     nextSteps
@@ -370,7 +369,8 @@ async function executeReviewRun(request) {
     const result = await runAppServerReview(request.cwd, {
       target: reviewTarget,
       model: request.model,
-      onProgress: request.onProgress
+      onProgress: request.onProgress,
+    signal: request.signal
     });
     const payload = {
       review: reviewName,
@@ -490,6 +490,7 @@ async function executeTaskRun(request) {
     effort: request.effort,
     sandbox: request.write ? "workspace-write" : "read-only",
     onProgress: request.onProgress,
+    signal: request.signal,
     persistThread: true,
     threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
   });
@@ -660,7 +661,7 @@ async function runForegroundCommand(job, runner, options = {}) {
     logFile: options.logFile,
     stderr: !options.json
   });
-  const execution = await runTrackedJob(job, () => runner(progress), { logFile });
+  const execution = await runTrackedJob(job, signal => runner(progress, signal), { logFile });
   outputResult(options.json ? execution.payload : execution.rendered, options.json);
   if (execution.exitStatus !== 0) {
     process.exitCode = execution.exitStatus;
@@ -685,17 +686,18 @@ function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
     logFile,
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
-  upsertJob(job.workspaceRoot, queuedRecord);
+  const child = spawnDetachedTaskWorker(cwd, job.id);
+  child.on("error", error => updateJob(job.workspaceRoot, job.id, current => ({ ...current, status: "failed", phase: "failed", errorMessage: error.message, pid: null, completedAt: nowIso() })));
+  updateJob(job.workspaceRoot, job.id, current => ({ ...current, pid: child.pid ?? null }));
 
   return {
     payload: {
@@ -738,8 +740,9 @@ async function handleReviewCommand(argv, config) {
   });
   await runForegroundCommand(
     job,
-    (progress) =>
+    (progress, signal) =>
       executeReviewRun({
+        signal,
         cwd,
         base: options.base,
         scope: options.scope,
@@ -763,6 +766,7 @@ async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
     booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    stopAtPositional: true,
     aliasMap: {
       m: "model"
     }
@@ -807,8 +811,9 @@ async function handleTask(argv) {
   const job = buildTaskJob(workspaceRoot, taskMetadata, write);
   await runForegroundCommand(
     job,
-    (progress) =>
+    (progress, signal) =>
       executeTaskRun({
+        signal,
         cwd,
         model,
         effort,
@@ -871,8 +876,9 @@ async function handleTaskWorker(argv) {
       workspaceRoot,
       logFile
     },
-    () =>
+    signal =>
       executeTaskRun({
+        signal,
         ...request,
         onProgress: progress
       }),
@@ -896,6 +902,7 @@ async function handleStatus(argv) {
         })
       : buildSingleJobSnapshot(cwd, reference);
     outputCommandResult(snapshot, renderJobStatusReport(snapshot.job), options.json);
+    if (snapshot.waitTimedOut) { if (!options.json) process.stderr.write("Status wait timed out while the job is still active.\n"); process.exitCode = 1; }
     return;
   }
 
@@ -961,64 +968,24 @@ function handleTaskResumeCandidate(argv) {
 }
 
 async function handleCancel(argv) {
-  const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
-    booleanOptions: ["json"]
-  });
-
+  const { options, positionals } = parseCommandInput(argv, { valueOptions: ["cwd"], booleanOptions: ["json"] });
   const cwd = resolveCommandCwd(options);
-  const reference = positionals[0] ?? "";
-  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
-  const existing = readStoredJob(workspaceRoot, job.id) ?? {};
-  const threadId = existing.threadId ?? job.threadId ?? null;
-  const turnId = existing.turnId ?? job.turnId ?? null;
-
-  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
-  if (interrupt.attempted) {
-    appendLogLine(
-      job.logFile,
-      interrupt.interrupted
-        ? `Requested Codex turn interrupt for ${turnId} on ${threadId}.`
-        : `Codex turn interrupt failed${interrupt.detail ? `: ${interrupt.detail}` : "."}`
-    );
+  reconcileJobs(cwd);
+  const { workspaceRoot, job } = resolveCancelableJob(cwd, positionals[0] ?? "", { env: process.env });
+  requestJobCancellation(workspaceRoot, job.id);
+  const deadline = Date.now() + 7000;
+  let latest = job;
+  while (Date.now() < deadline) {
+    reconcileJobs(workspaceRoot);
+    latest = listJobs(workspaceRoot).find(candidate => candidate.id === job.id);
+    if (latest && !isActiveJobStatus(latest.status)) break;
+    await sleep(100);
   }
-
-  terminateProcessTree(job.pid ?? Number.NaN);
-  appendLogLine(job.logFile, "Cancelled by user.");
-
-  const completedAt = nowIso();
-  const nextJob = {
-    ...job,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    completedAt,
-    errorMessage: "Cancelled by user."
-  };
-
-  writeJobFile(workspaceRoot, job.id, {
-    ...existing,
-    ...nextJob,
-    cancelledAt: completedAt
-  });
-  upsertJob(workspaceRoot, {
-    id: job.id,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    errorMessage: "Cancelled by user.",
-    completedAt
-  });
-
-  const payload = {
-    jobId: job.id,
-    status: "cancelled",
-    title: job.title,
-    turnInterruptAttempted: interrupt.attempted,
-    turnInterrupted: interrupt.interrupted
-  };
-
-  outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+  const payload = { jobId: job.id, status: latest.status, cancellationRequested: true };
+  if (isActiveJobStatus(latest.status)) {
+    outputCommandResult(payload, `Cancellation requested for ${job.id}; the owner has not acknowledged it. Check /codex:status ${job.id}.\n`, options.json);
+    process.exitCode = 1;
+  } else outputCommandResult(payload, renderCancelReport(latest), options.json);
 }
 
 async function main() {

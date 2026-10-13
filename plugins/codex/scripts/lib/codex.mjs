@@ -40,8 +40,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
-import { loadBrokerSession } from "./broker-lifecycle.mjs";
+import { CodexAppServerClient, durationSetting } from "./app-server.mjs";
 import { binaryAvailable } from "./process.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
@@ -64,7 +63,7 @@ function buildThreadParams(cwd, options = {}) {
   return {
     cwd,
     model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
+    approvalPolicy: options.approvalPolicy ?? null,
     sandbox: options.sandbox ?? "read-only",
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true
@@ -77,7 +76,7 @@ function buildResumeParams(threadId, cwd, options = {}) {
     threadId,
     cwd,
     model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
+    approvalPolicy: options.approvalPolicy ?? null,
     sandbox: options.sandbox ?? "read-only"
   };
 }
@@ -95,7 +94,7 @@ function shorten(text, limit = 72) {
   if (normalized.length <= limit) {
     return normalized;
   }
-  return `${normalized.slice(0, limit - 3)}...`;
+  return `${Array.from(normalized).slice(0, limit - 3).join("")}...`;
 }
 
 function looksLikeVerificationCommand(command) {
@@ -248,7 +247,7 @@ function describeStartedItem(state, item) {
         phase: looksLikeVerificationCommand(item.command) ? "verifying" : "running"
       };
     case "fileChange":
-      return { message: `Applying ${item.changes.length} file change(s).`, phase: "editing" };
+      return { message: `Applying ${(item.changes ?? []).length} file change(s).`, phase: "editing" };
     case "mcpToolCall":
       return { message: `Calling ${item.server}/${item.tool}.`, phase: "investigating" };
     case "dynamicToolCall":
@@ -370,29 +369,6 @@ function completeTurn(state, turn = null, options = {}) {
   state.resolveCompletion(state);
 }
 
-function scheduleInferredCompletion(state) {
-  if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
-    return;
-  }
-
-  if (state.pendingCollaborations.size > 0 || state.activeSubagentTurns.size > 0) {
-    return;
-  }
-
-  clearCompletionTimer(state);
-  state.completionTimer = setTimeout(() => {
-    state.completionTimer = null;
-    if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
-      return;
-    }
-    if (state.pendingCollaborations.size > 0 || state.activeSubagentTurns.size > 0) {
-      return;
-    }
-    completeTurn(state, null, { inferred: true });
-  }, 250);
-  state.completionTimer.unref?.();
-}
-
 function belongsToTurn(state, message) {
   const messageThreadId = extractThreadId(message);
   if (!messageThreadId || !state.threadIds.has(messageThreadId)) {
@@ -410,7 +386,7 @@ function recordItem(state, item, lifecycle, threadId = null) {
         state.pendingCollaborations.add(item.id);
       } else if (lifecycle === "completed") {
         state.pendingCollaborations.delete(item.id);
-        scheduleInferredCompletion(state);
+        // Completion is authoritative only when the root turn finishes.
       }
     }
     for (const receiverThreadId of item.receiverThreadIds ?? []) {
@@ -429,7 +405,7 @@ function recordItem(state, item, lifecycle, threadId = null) {
         state.lastAgentMessage = item.text;
         if (lifecycle === "completed" && item.phase === "final_answer") {
           state.finalAnswerSeen = true;
-          scheduleInferredCompletion(state);
+          // Completion is authoritative only when the root turn finishes.
         }
       }
       if (lifecycle === "completed") {
@@ -535,13 +511,16 @@ function applyTurnNotification(state, message) {
       }
       break;
     case "error":
-      state.error = message.params.error;
+      state.error = message.params.willRetry === true ? null : message.params.error;
+      if (message.params.willRetry !== true && (message.params.threadId ?? state.threadId) === state.threadId) {
+        completeTurn(state, { id: state.turnId, status: "failed", items: [], error: message.params.error });
+      }
       emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
       break;
     case "turn/completed":
       if ((message.params.threadId ?? null) !== state.threadId) {
         state.activeSubagentTurns.delete(message.params.threadId);
-        scheduleInferredCompletion(state);
+        // Completion is authoritative only when the root turn finishes.
         break;
       }
       emitProgress(
@@ -556,93 +535,66 @@ function applyTurnNotification(state, message) {
   }
 }
 
-async function captureTurn(client, threadId, startRequest, options = {}) {
+export async function captureTurn(client, threadId, startRequest, options = {}) {
+  if (options.signal?.aborted) throw options.signal.reason ?? new Error("Codex job cancelled.");
   const state = createTurnCaptureState(threadId, options);
   const previousHandler = client.notificationHandler;
-
-  client.setNotificationHandler((message) => {
-    if (!state.turnId) {
-      state.bufferedNotifications.push(message);
-      return;
-    }
-
-    if (message.method === "thread/started" || message.method === "thread/name/updated") {
+  let startResponded = false;
+  const accept = message => {
+    if (message.method === "thread/started" || message.method === "thread/name/updated" || belongsToTurn(state, message)) {
       applyTurnNotification(state, message);
-      return;
-    }
-
-    if (!belongsToTurn(state, message)) {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-        return;
-    }
-
-    applyTurnNotification(state, message);
+    } else previousHandler?.(message);
+  };
+  client.setNotificationHandler(message => {
+    if (!startResponded) state.bufferedNotifications.push(message);
+    else accept(message);
   });
-
-  try {
+  let timeout;
+  const aborted = new Promise((_, reject) => {
+    options.signal?.addEventListener("abort", abort, { once: true });
+    function abort() { reject(options.signal.reason ?? new Error("Codex job cancelled.")); }
+    if (options.signal?.aborted) abort();
+    options.cleanupAbort = () => options.signal?.removeEventListener("abort", abort);
+  });
+  const timedOut = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error("Codex turn exceeded its runtime budget. Resume the saved thread to continue.")),
+      durationSetting(options.timeoutMs ?? process.env.CODEX_COMPANION_TURN_TIMEOUT_MS, 30 * 60 * 1000));
+  });
+  const disconnected = client.exitPromise.then(() => { throw client.exitError ?? new Error("Codex connection closed before turn completion."); });
+  const lifecycle = (async () => {
     const response = await startRequest();
     options.onResponse?.(response, state);
     state.turnId = response.turn?.id ?? null;
-    if (state.turnId) {
-      state.threadTurnIds.set(state.threadId, state.turnId);
-    }
-    for (const message of state.bufferedNotifications) {
-      if (belongsToTurn(state, message)) {
-        applyTurnNotification(state, message);
-      } else {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-      }
-    }
+    if (state.turnId) state.threadTurnIds.set(state.threadId, state.turnId);
+    startResponded = true;
+    for (const message of state.bufferedNotifications) accept(message);
     state.bufferedNotifications.length = 0;
-
-    if (response.turn?.status && response.turn.status !== "inProgress") {
-      completeTurn(state, response.turn);
+    if (response.turn?.status && response.turn.status !== "inProgress") completeTurn(state, response.turn);
+    return state.completion;
+  })();
+  try { return await Promise.race([lifecycle, disconnected, timedOut, aborted]); }
+  catch (error) {
+    // Do not retry the turn. Interrupt the same owned runtime, then close it.
+    if (state.turnId && !client.closed) {
+      await Promise.race([client.request("turn/interrupt", { threadId: state.threadId, turnId: state.turnId }).catch(() => {}),
+        new Promise(resolve => setTimeout(resolve, 1000))]);
     }
-
-    return await state.completion;
+    throw Object.assign(error, { threadId: state.threadId, turnId: state.turnId });
   } finally {
-    clearCompletionTimer(state);
-    client.setNotificationHandler(previousHandler ?? null);
+    clearTimeout(timeout); options.cleanupAbort?.();
+    clearCompletionTimer(state); client.setNotificationHandler(previousHandler ?? null);
   }
 }
 
 async function withAppServer(cwd, fn) {
-  let client = null;
-  try {
-    client = await CodexAppServerClient.connect(cwd);
-    const result = await fn(client);
-    await client.close();
-    return result;
-  } catch (error) {
-    const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
-    const shouldRetryDirect =
-      (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
-      (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
-
-    if (client) {
-      await client.close().catch(() => {});
-      client = null;
-    }
-
-    if (!shouldRetryDirect) {
-      throw error;
-    }
-
-    const directClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
-    try {
-      return await fn(directClient);
-    } finally {
-      await directClient.close();
-    }
-  }
+  // A fresh owned process loads the persisted thread and current config. No
+  // global runtime, stale credentials, ownership ambiguity, or replay fallback.
+  const client = await CodexAppServerClient.connect(cwd);
+  try { return await fn(client); } finally { await client.close(); }
 }
 
 async function withDirectAppServer(cwd, fn) {
-  const client = await CodexAppServerClient.connect(cwd, { disableBroker: true });
+  const client = await CodexAppServerClient.connect(cwd);
   try {
     return await fn(client);
   } finally {
@@ -658,24 +610,32 @@ function sourceContentSha256(sourcePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(sourcePath)).digest("hex");
 }
 
-function importedThreadIdForSource(sourcePath) {
+export function importedThreadIdForSource(sourcePath, expectedHash = null, previousIds = null) {
   const ledgerPath = path.join(resolveCodexHome(), "external_agent_session_imports.json");
   if (!fs.existsSync(ledgerPath)) {
     return null;
   }
   const ledger = readJsonFile(ledgerPath);
   const canonicalSource = fs.realpathSync(sourcePath);
-  const contentSha256 = sourceContentSha256(canonicalSource);
+  const contentSha256 = expectedHash;
   const records = Array.isArray(ledger?.records) ? ledger.records : [];
   const match = records
     .filter(
       (record) =>
-        record?.source_path === canonicalSource &&
-        record?.content_sha256 === contentSha256 &&
+        normalizeImportPath(record?.source_path) === normalizeImportPath(canonicalSource) &&
+        (contentSha256 === null || record?.content_sha256 === contentSha256 || (previousIds && !previousIds.has(record.imported_thread_id))) &&
         typeof record?.imported_thread_id === "string"
     )
     .at(-1);
   return match?.imported_thread_id ?? null;
+}
+
+function normalizeImportPath(value) {
+  if (typeof value !== "string") return "";
+  let result = value;
+  if (result.toUpperCase().startsWith("\\\\?\\UNC\\")) result = "\\\\" + result.slice(8);
+  else if (result.startsWith("\\\\?\\")) result = result.slice(4);
+  return process.platform === "win32" ? result.replaceAll("/", "\\").toLowerCase() : result;
 }
 
 function externalAgentSessionMigration(sourcePath, cwd) {
@@ -716,13 +676,12 @@ async function requestExternalAgentSessionImport(client, params) {
     }
     previousHandler?.(message);
   });
-  timeout = setTimeout(() => {
-    rejectCompleted(new Error("Timed out waiting for Codex to finish importing the Claude session."));
-  }, EXTERNAL_AGENT_IMPORT_TIMEOUT_MS);
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error("Timed out waiting for Codex to finish importing the Claude session.")), EXTERNAL_AGENT_IMPORT_TIMEOUT_MS);
+  });
 
   try {
-    await client.request("externalAgentConfig/import", params);
-    await completed;
+    await Promise.race([Promise.all([client.request("externalAgentConfig/import", params), completed]), deadline]);
   } finally {
     clearTimeout(timeout);
     client.setNotificationHandler(previousHandler ?? null);
@@ -740,7 +699,7 @@ async function startThread(client, cwd, options = {}) {
       // that don't support thread/name/set. Rethrow auth, network, or server errors.
       const msg = String(err?.message ?? err ?? "");
       if (!msg.includes("unknown variant") && !msg.includes("unknown method")) {
-        throw err;
+        throw Object.assign(err, { threadId });
       }
     }
   }
@@ -752,7 +711,7 @@ async function resumeThread(client, threadId, cwd, options = {}) {
 }
 
 function buildResultStatus(turnState) {
-  return turnState.finalTurn?.status === "completed" ? 0 : 1;
+  return turnState.finalTurn?.status === "completed" && !turnState.error ? 0 : 1;
 }
 
 const BUILTIN_PROVIDER_LABELS = new Map([
@@ -903,23 +862,9 @@ export function getCodexAvailability(cwd) {
   };
 }
 
-export function getSessionRuntimeStatus(env = process.env, cwd = process.cwd()) {
-  const endpoint = env?.[BROKER_ENDPOINT_ENV] ?? loadBrokerSession(cwd)?.endpoint ?? null;
-  if (endpoint) {
-    return {
-      mode: "shared",
-      label: "shared session",
-      detail: "This Claude session is configured to reuse one shared Codex runtime.",
-      endpoint
-    };
-  }
-
-  return {
-    mode: "direct",
-    label: "direct startup",
-    detail: "No shared Codex runtime is active yet. The first review or task command will start one on demand.",
-    endpoint: null
-  };
+export function getSessionRuntimeStatus() {
+  return { mode: "direct", label: "owned runtime", endpoint: null,
+    detail: "Each Codex job owns one runtime. Stored thread IDs preserve resume across runs." };
 }
 
 export async function getCodexAuthStatus(cwd, options = {}) {
@@ -940,8 +885,7 @@ export async function getCodexAuthStatus(cwd, options = {}) {
   let client = null;
   try {
     client = await CodexAppServerClient.connect(cwd, {
-      env: options.env,
-      reuseExistingBroker: true
+      env: options.env
     });
     return await getCodexAuthStatusFromClient(client, cwd);
   } catch (error) {
@@ -954,48 +898,6 @@ export async function getCodexAuthStatus(cwd, options = {}) {
     if (client) {
       await client.close().catch(() => {});
     }
-  }
-}
-
-export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
-  if (!threadId || !turnId) {
-    return {
-      attempted: false,
-      interrupted: false,
-      transport: null,
-      detail: "missing threadId or turnId"
-    };
-  }
-
-  const availability = getCodexAvailability(cwd);
-  if (!availability.available) {
-    return {
-      attempted: false,
-      interrupted: false,
-      transport: null,
-      detail: availability.detail
-    };
-  }
-
-  let client = null;
-  try {
-    client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
-    await client.request("turn/interrupt", { threadId, turnId });
-    return {
-      attempted: true,
-      interrupted: true,
-      transport: client.transport,
-      detail: `Interrupted ${turnId} on ${threadId}.`
-    };
-  } catch (error) {
-    return {
-      attempted: true,
-      interrupted: false,
-      transport: client?.transport ?? null,
-      detail: error instanceof Error ? error.message : String(error)
-    };
-  } finally {
-    await client?.close().catch(() => {});
   }
 }
 
@@ -1030,6 +932,8 @@ export async function runAppServerReview(cwd, options = {}) {
         }),
       {
         onProgress: options.onProgress,
+        signal: options.signal,
+        timeoutMs: options.timeoutMs,
         onResponse(response, state) {
           if (response.reviewThreadId) {
             state.threadIds.add(response.reviewThreadId);
@@ -1064,6 +968,10 @@ export async function importExternalAgentSession(cwd, options = {}) {
     throw new Error("A Claude session source path is required.");
   }
 
+  const expectedHash = sourceContentSha256(options.sourcePath);
+  const ledgerPath = path.join(resolveCodexHome(), "external_agent_session_imports.json");
+  const previousIds = new Set((fs.existsSync(ledgerPath) ? readJsonFile(ledgerPath).records ?? [] : []).map(record => record.imported_thread_id));
+
   return withDirectAppServer(cwd, async (client) => {
     emitProgress(options.onProgress, "Importing Claude session into Codex.", "transferring");
     try {
@@ -1077,7 +985,7 @@ export async function importExternalAgentSession(cwd, options = {}) {
       }
       throw error;
     }
-    const threadId = importedThreadIdForSource(options.sourcePath);
+    const threadId = importedThreadIdForSource(options.sourcePath, expectedHash, previousIds);
     if (!threadId) {
       const stderr = cleanCodexStderr(client.stderr);
       throw new Error(
@@ -1138,9 +1046,12 @@ export async function runAppServerTurn(cwd, options = {}) {
           input: buildTurnInput(prompt),
           model: options.model ?? null,
           effort: options.effort ?? null,
-          outputSchema: options.outputSchema ?? null
+          outputSchema: options.outputSchema ?? null,
+          sandboxPolicy: options.sandbox === "workspace-write"
+            ? { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+            : { type: "readOnly", networkAccess: false }
         }),
-      { onProgress: options.onProgress }
+      { onProgress: options.onProgress, signal: options.signal, timeoutMs: options.timeoutMs }
     );
 
     return {

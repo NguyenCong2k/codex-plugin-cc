@@ -2,6 +2,8 @@
 
 Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
 
+This fork maintains root-cause reliability fixes on the `patched` branch; `main` tracks OpenAI upstream. See [remediation](docs/REMEDIATION.md).
+
 This plugin is for Claude Code users who want an easy way to start using Codex from the workflow
 they already have.
 
@@ -19,18 +21,49 @@ they already have.
   - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
 - **Node.js 18.18 or later**
 
+## Reliability changes in this fork
+
+Each job owns an app-server supervised by a guardian. A session ending requests cancellation of its own jobs; it cannot terminate another session's runtime. Job records use private storage and atomic interprocess transactions. Active jobs remain available regardless of the history cap, and finished results survive session exit. RPCs and turns have explicit deadlines, with no automatic replay after an uncertain outcome.
+
+The defaults are a 30-second RPC deadline and a 30-minute turn budget. Override them with positive millisecond values in `CODEX_COMPANION_RPC_TIMEOUT_MS` and `CODEX_COMPANION_TURN_TIMEOUT_MS`. Cancellation is acknowledged by the worker; the helper reports a pending cancellation if the owner has not responded.
+
+State is kept in `~/.codex-plugin-cc`, independent of `CLAUDE_PLUGIN_DATA`. Set `CODEX_COMPANION_STATE_HOME` to a private directory to choose another location. Old temporary state and broker processes are not imported or signalled automatically. Re-enable the review gate with `/codex:setup --enable-review-gate` after migrating; keep the old installation available if you need to retrieve its old job history.
+
+Rescue uses a prompt file and grants write access only for an authorized edit request. Direct CLI task calls parse flags only before the first positional prompt; use `--` or `--prompt-file` to preserve text that begins with a flag. Slash-command wrappers use `--arguments-stdin` with a quoted heredoc, so shell metacharacters in arguments stay literal. `--arguments-file` and explicit `--arguments` are also available to callers using a safe literal argv/file transport.
+
+Interactive approvals, elicitation and credential refresh callbacks require an interactive Codex client. The helper reports that requirement and the saved thread ID instead of manufacturing consent or claiming a successful run. Model and reasoning-effort values are forwarded to Codex for validation, so new server-supported values do not require a plugin-side allowlist update.
+
+## Receiving upstream updates
+
+`main` tracks OpenAI's repository; `patched` contains the maintained fork. The fork's default branch is `patched` so marketplace installs receive the fixes.
+
+```bash
+git fetch upstream
+git switch main
+git merge --ff-only upstream/main
+git push origin main
+git switch patched
+git merge main
+npm ci
+npm test
+npm run build
+git push origin patched
+```
+
+Resolve conflicts before testing and publishing. When upstream implements an equivalent fix, remove the duplicate fork implementation while preserving its regression coverage. The upstream remote is `https://github.com/openai/codex-plugin-cc.git`; origin is this fork.
+
 ## Install
 
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add openai/codex-plugin-cc
+/plugin marketplace add NguyenCong2k/codex-plugin-cc
 ```
 
 Install the plugin:
 
 ```bash
-/plugin install codex@openai-codex
+/plugin install codex@nguyencong-codex
 ```
 
 Reload plugins:
@@ -266,7 +299,7 @@ Then check in with:
 
 ## Codex Integration
 
-The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses the global `codex` binary installed in your environment and [applies the same configuration](https://developers.openai.com/codex/config-basic).
+The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses your installed `codex` executable and configuration. Each job owns a fresh app-server and closes it on completion or interruption. Stored threads remain resumable. Model and approval policy inherit your configuration; the requested read-only/workspace-write sandbox is enforced explicitly per turn. Interactive approval or elicitation requests fail with a resumable thread ID; complete them in interactive Codex.
 
 ### Common Configurations
 

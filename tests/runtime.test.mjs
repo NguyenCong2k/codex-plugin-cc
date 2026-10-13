@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
-import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { setConfig } from "../plugins/codex/scripts/lib/state.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -220,6 +220,7 @@ test("transfer delegates the current Claude session directly to native import", 
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      USERPROFILE: home,
       CODEX_HOME: path.join(home, ".codex"),
       CODEX_COMPANION_TRANSCRIPT_PATH: sourcePath
     }
@@ -265,6 +266,7 @@ test("transfer reports an actionable upgrade error when native import is unsuppo
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      USERPROFILE: home,
       CODEX_HOME: path.join(home, ".codex")
     }
   });
@@ -295,6 +297,7 @@ test("transfer fails visibly when native import completes without a ledger recor
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      USERPROFILE: home,
       CODEX_HOME: path.join(home, ".codex")
     }
   });
@@ -356,7 +359,7 @@ test("review accepts the quoted raw argument style for built-in base-branch revi
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 2;\n");
 
-  const result = run("node", [SCRIPT, "review", "--base main"], {
+  const result = run("node", [SCRIPT, "review", "--arguments", "--base main"], {
     cwd: repo,
     env: buildEnv(binDir)
   });
@@ -669,7 +672,7 @@ test("task --resume-last ignores running tasks from other Claude sessions", () =
   assert.match(resume.stderr, /No previous Codex task thread was found for this repository\./);
 });
 
-test("session start hook exports the Claude session id, transcript path, and plugin data dir", () => {
+test("session start hook exports the Claude session id, transcript path, and stable state home", () => {
   const repo = makeTempDir();
   const envFile = path.join(makeTempDir(), "claude-env.sh");
   fs.writeFileSync(envFile, "", "utf8");
@@ -681,7 +684,7 @@ test("session start hook exports the Claude session id, transcript path, and plu
     env: {
       ...process.env,
       CLAUDE_ENV_FILE: envFile,
-      CLAUDE_PLUGIN_DATA: pluginDataDir
+      CODEX_COMPANION_STATE_HOME: pluginDataDir
     },
     input: JSON.stringify({
       hook_event_name: "SessionStart",
@@ -694,7 +697,7 @@ test("session start hook exports the Claude session id, transcript path, and plu
   assert.equal(result.status, 0, result.stderr);
   assert.equal(
     fs.readFileSync(envFile, "utf8"),
-    `export CODEX_COMPANION_SESSION_ID='sess-current'\nexport CODEX_COMPANION_TRANSCRIPT_PATH='${transcriptPath}'\nexport CLAUDE_PLUGIN_DATA='${pluginDataDir}'\n`
+    `export CODEX_COMPANION_SESSION_ID='sess-current'\nexport CODEX_COMPANION_TRANSCRIPT_PATH='${transcriptPath}'\nexport CODEX_COMPANION_STATE_HOME='${pluginDataDir}'\n`
   );
 });
 
@@ -872,7 +875,7 @@ test("task ignores later subagent messages when choosing the final returned outp
   assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
 });
 
-test("task can finish after subagent work even if the parent turn/completed event is missing", () => {
+test("task fails visibly when authoritative parent completion is missing", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir, "with-subagent-no-main-turn-completed");
@@ -883,14 +886,15 @@ test("task can finish after subagent work even if the parent turn/completed even
 
   const result = run("node", [SCRIPT, "task", "challenge the current design"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    env: { ...buildEnv(binDir), CODEX_COMPANION_TURN_TIMEOUT_MS: "150" }
   });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /runtime budget/);
+
 });
 
-test("task using the shared broker still completes when Codex spawns subagents", () => {
+test("task using an owned runtime still completes when Codex spawns subagents", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir, "with-subagent");
@@ -907,9 +911,6 @@ test("task using the shared broker still completes when Codex spawns subagents",
   });
   assert.equal(review.status, 0, review.stderr);
 
-  if (!loadBrokerSession(repo)) {
-    return;
-  }
 
   const result = run("node", [SCRIPT, "task", "challenge the current design"], {
     cwd: repo,
@@ -979,7 +980,7 @@ test("review rejects focus text because it is native-review only", () => {
   run("git", ["commit", "-m", "init"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
 
-  const result = run("node", [SCRIPT, "review", "--scope working-tree focus on auth"], {
+  const result = run("node", [SCRIPT, "review", "--arguments", "--scope working-tree focus on auth"], {
     cwd: repo,
     env: buildEnv(binDir)
   });
@@ -1149,7 +1150,7 @@ test("status shows phases, hints, and the latest finished job", () => {
   assert.match(result.stdout, /Live details:/);
   assert.match(result.stdout, /Latest finished:/);
   assert.match(result.stdout, /Progress:/);
-  assert.match(result.stdout, /Session runtime: direct startup/);
+  assert.match(result.stdout, /Session runtime: owned runtime/);
   assert.match(result.stdout, /Phase: reviewing/);
   assert.match(result.stdout, /Codex session ID: thr_1/);
   assert.match(result.stdout, /Resume in Codex: codex resume thr_1/);
@@ -1345,7 +1346,7 @@ test("status --wait times out cleanly when a job is still active", () => {
     cwd: workspace
   });
 
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 1, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.job.id, "task-live");
   assert.equal(payload.job.status, "running");
@@ -1539,99 +1540,14 @@ test("result for a finished write-capable task returns the raw Codex final respo
   assert.match(result.stdout, /Resume in Codex: codex resume thr_[a-z0-9]+/i);
 });
 
-test("cancel stops an active background job and marks it cancelled", async (t) => {
-  const workspace = makeTempDir();
-  const stateDir = resolveStateDir(workspace);
-  const jobsDir = path.join(stateDir, "jobs");
-  fs.mkdirSync(jobsDir, { recursive: true });
-
-  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-    cwd: workspace,
-    detached: true,
-    stdio: "ignore"
-  });
-  sleeper.unref();
-
-  t.after(() => {
-    try {
-      process.kill(-sleeper.pid, "SIGTERM");
-    } catch {
-      try {
-        process.kill(sleeper.pid, "SIGTERM");
-      } catch {
-        // Ignore missing process.
-      }
-    }
-  });
-
-  const logFile = path.join(jobsDir, "task-live.log");
-  const jobFile = path.join(jobsDir, "task-live.json");
-  fs.writeFileSync(logFile, "[2026-03-18T15:30:00.000Z] Starting Codex Task.\n", "utf8");
-  fs.writeFileSync(
-    jobFile,
-    JSON.stringify(
-      {
-        id: "task-live",
-        status: "running",
-        title: "Codex Task",
-        logFile
-      },
-      null,
-      2
-    ),
-    "utf8"
-  );
-  fs.writeFileSync(
-    path.join(stateDir, "state.json"),
-    `${JSON.stringify(
-      {
-        version: 1,
-        config: { stopReviewGate: false },
-        jobs: [
-          {
-            id: "task-live",
-            status: "running",
-            title: "Codex Task",
-            jobClass: "task",
-            summary: "Investigate flaky test",
-            pid: sleeper.pid,
-            logFile,
-            createdAt: "2026-03-18T15:30:00.000Z",
-            startedAt: "2026-03-18T15:30:01.000Z",
-            updatedAt: "2026-03-18T15:30:02.000Z"
-          }
-        ]
-      },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
-
-  const cancelResult = run("node", [SCRIPT, "cancel", "task-live", "--json"], {
-    cwd: workspace
-  });
-
-  assert.equal(cancelResult.status, 0, cancelResult.stderr);
-  assert.equal(JSON.parse(cancelResult.stdout).status, "cancelled");
-
-  await waitFor(() => {
-    try {
-      process.kill(sleeper.pid, 0);
-      return false;
-    } catch (error) {
-      return error?.code === "ESRCH";
-    }
-  });
-
-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-  const cancelled = state.jobs.find((job) => job.id === "task-live");
-  assert.equal(cancelled.status, "cancelled");
-  assert.equal(cancelled.pid, null);
-
-  const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
-  assert.equal(stored.status, "cancelled");
-  assert.match(fs.readFileSync(logFile, "utf8"), /Cancelled by user/);
+test("cancel is acknowledged by the owning background worker", async () => {
+  const repo = makeTempDir(), bin = makeTempDir(); installFakeCodex(bin, "interruptible-slow-task"); initGitRepo(repo);
+  const env = buildEnv(bin);
+  const launch = run("node", [SCRIPT,"task","--background","--json","bounded cancellation test"], {cwd:repo,env});
+  assert.equal(launch.status,0,launch.stderr); const id=JSON.parse(launch.stdout).jobId;
+  await waitFor(() => {const state=JSON.parse(fs.readFileSync(path.join(resolveStateDir(repo),"state.json"),"utf8"));return state.jobs.find(j=>j.id===id && j.turnId);},{timeoutMs:15000});
+  const cancelled=run("node",[SCRIPT,"cancel",id,"--json"],{cwd:repo,env});
+  assert.equal(cancelled.status,0,cancelled.stderr);assert.equal(JSON.parse(cancelled.stdout).status,"cancelled");
 });
 
 test("cancel without a job id ignores active jobs from other Claude sessions", () => {
@@ -1730,14 +1646,14 @@ test("cancel with a job id can still target an active job from another Claude se
     cwd: workspace,
     env
   });
-  assert.equal(cancel.status, 0, cancel.stderr);
+  assert.equal(cancel.status, 1, cancel.stderr);
   assert.equal(JSON.parse(cancel.stdout).jobId, "task-other");
 
   const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-  assert.equal(state.jobs[0].status, "cancelled");
+  assert.ok(state.jobs[0].cancelRequestedAt);
 });
 
-test("cancel sends turn interrupt to the shared app-server before killing a brokered task", async () => {
+test("owning worker interrupts its own runtime before acknowledging cancellation", async () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -1776,8 +1692,7 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
   assert.equal(cancelResult.status, 0, cancelResult.stderr);
   const cancelPayload = JSON.parse(cancelResult.stdout);
   assert.equal(cancelPayload.status, "cancelled");
-  assert.equal(cancelPayload.turnInterruptAttempted, true);
-  assert.equal(cancelPayload.turnInterrupted, true);
+  assert.equal(cancelPayload.cancellationRequested, true);
 
   await waitFor(() => {
     const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
@@ -1801,126 +1716,16 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("session end fully cleans up jobs for the ending session", async (t) => {
-  const repo = makeTempDir();
-  initGitRepo(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
-  run("git", ["add", "README.md"], { cwd: repo });
-  run("git", ["commit", "-m", "init"], { cwd: repo });
-
-  const stateDir = resolveStateDir(repo);
-  const jobsDir = path.join(stateDir, "jobs");
-  fs.mkdirSync(jobsDir, { recursive: true });
-
-  const completedLog = path.join(jobsDir, "completed.log");
-  const runningLog = path.join(jobsDir, "running.log");
-  const otherSessionLog = path.join(jobsDir, "other.log");
-  const completedJobFile = path.join(jobsDir, "review-completed.json");
-  const runningJobFile = path.join(jobsDir, "review-running.json");
-  const otherJobFile = path.join(jobsDir, "review-other.json");
-  fs.writeFileSync(completedLog, "completed\n", "utf8");
-  fs.writeFileSync(runningLog, "running\n", "utf8");
-  fs.writeFileSync(otherSessionLog, "other\n", "utf8");
-  fs.writeFileSync(completedJobFile, JSON.stringify({ id: "review-completed" }, null, 2), "utf8");
-  fs.writeFileSync(otherJobFile, JSON.stringify({ id: "review-other" }, null, 2), "utf8");
-
-  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-    cwd: repo,
-    detached: true,
-    stdio: "ignore"
-  });
-  sleeper.unref();
-  fs.writeFileSync(runningJobFile, JSON.stringify({ id: "review-running" }, null, 2), "utf8");
-
-  t.after(() => {
-    try {
-      process.kill(-sleeper.pid, "SIGTERM");
-    } catch {
-      try {
-        process.kill(sleeper.pid, "SIGTERM");
-      } catch {
-        // Ignore missing process.
-      }
-    }
-  });
-
-  fs.writeFileSync(
-    path.join(stateDir, "state.json"),
-    `${JSON.stringify(
-      {
-        version: 1,
-        config: { stopReviewGate: false },
-        jobs: [
-          {
-            id: "review-completed",
-            status: "completed",
-            title: "Codex Review",
-            sessionId: "sess-current",
-            logFile: completedLog,
-            createdAt: "2026-03-18T15:30:00.000Z",
-            updatedAt: "2026-03-18T15:31:00.000Z"
-          },
-          {
-            id: "review-running",
-            status: "running",
-            title: "Codex Review",
-            sessionId: "sess-current",
-            pid: sleeper.pid,
-            logFile: runningLog,
-            createdAt: "2026-03-18T15:32:00.000Z",
-            updatedAt: "2026-03-18T15:33:00.000Z"
-          },
-          {
-            id: "review-other",
-            status: "completed",
-            title: "Codex Review",
-            sessionId: "sess-other",
-            logFile: otherSessionLog,
-            createdAt: "2026-03-18T15:34:00.000Z",
-            updatedAt: "2026-03-18T15:35:00.000Z"
-          }
-        ]
-      },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
-
-  const result = run("node", [SESSION_HOOK, "SessionEnd"], {
-    cwd: repo,
-    env: {
-      ...process.env,
-      CODEX_COMPANION_SESSION_ID: "sess-current"
-    },
-    input: JSON.stringify({
-      hook_event_name: "SessionEnd",
-      session_id: "sess-current",
-      cwd: repo
-    })
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.existsSync(otherSessionLog), true);
-  assert.equal(fs.existsSync(otherJobFile), true);
-  assert.deepEqual(
-    fs.readdirSync(path.dirname(otherJobFile)).sort(),
-    [path.basename(otherJobFile), path.basename(otherSessionLog)].sort()
-  );
-
-  await waitFor(() => {
-    try {
-      process.kill(sleeper.pid, 0);
-      return false;
-    } catch (error) {
-      return error?.code === "ESRCH";
-    }
-  });
-
-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-  assert.deepEqual(state.jobs.map((job) => job.id), ["review-other"]);
-  const otherJob = state.jobs[0];
-  assert.equal(otherJob.logFile, otherSessionLog);
+test("SessionEnd requests only its own cancellations and preserves finished evidence", () => {
+  const cwd=makeTempDir();const stateDir=resolveStateDir(cwd);fs.mkdirSync(stateDir,{recursive:true,mode:0o700});
+  fs.writeFileSync(path.join(stateDir,"state.json"),JSON.stringify({config:{stopReviewGate:false},jobs:[
+    {id:"own",status:"running",sessionId:"A"},{id:"other",status:"running",sessionId:"B"},{id:"finished",status:"completed",sessionId:"A"}]}));
+  const result=run("node",[SESSION_HOOK,"SessionEnd"],{cwd,input:JSON.stringify({cwd,session_id:"A"})});
+  assert.equal(result.status,0,result.stderr);
+  const state=JSON.parse(fs.readFileSync(path.join(stateDir,"state.json"),"utf8"));
+  assert.ok(state.jobs.find(j=>j.id==="own").cancelRequestedAt);
+  assert.equal(state.jobs.find(j=>j.id==="other").cancelRequestedAt,undefined);
+  assert.equal(state.jobs.find(j=>j.id==="finished").status,"completed");
 });
 
 test("stop hook runs a stop-time review task and blocks on findings when the review gate is enabled", () => {
@@ -1976,7 +1781,8 @@ test("stop hook runs a stop-time review task and blocks on findings when the rev
     }
   });
   assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, /Codex Stop Gate Review/);
+  assert.doesNotMatch(status.stdout, /Codex Stop Gate Review/);
+  assert.ok(fakeState.threads.some(thread => thread.ephemeral), "Stop reviews must not create persistent task threads");
 });
 
 test("stop hook logs running tasks to stderr without blocking when the review gate is disabled", () => {
@@ -2116,7 +1922,7 @@ test("stop hook runs the actual task when auth status looks stale", () => {
   assert.match(payload.reason, /Missing empty-state guard/i);
 });
 
-test("commands lazily start and reuse one shared app-server after first use", async () => {
+test("commands own separate app-servers and leave no shared daemon", async () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -2136,10 +1942,6 @@ test("commands lazily start and reuse one shared app-server after first use", as
   });
   assert.equal(review.status, 0, review.stderr);
 
-  const brokerSession = loadBrokerSession(repo);
-  if (!brokerSession) {
-    return;
-  }
 
   const adversarial = run("node", [SCRIPT, "adversarial-review"], {
     cwd: repo,
@@ -2148,7 +1950,7 @@ test("commands lazily start and reuse one shared app-server after first use", as
   assert.equal(adversarial.status, 0, adversarial.stderr);
 
   const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
-  assert.equal(fakeState.appServerStarts, 1);
+  assert.equal(fakeState.appServerStarts, 2);
 
   const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
     cwd: repo,
@@ -2161,7 +1963,7 @@ test("commands lazily start and reuse one shared app-server after first use", as
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("setup reuses an existing shared app-server without starting another one", () => {
+test("setup starts its own short-lived runtime after a review", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -2181,10 +1983,6 @@ test("setup reuses an existing shared app-server without starting another one", 
   });
   assert.equal(review.status, 0, review.stderr);
 
-  const brokerSession = loadBrokerSession(repo);
-  if (!brokerSession) {
-    return;
-  }
 
   const setup = run("node", [SCRIPT, "setup", "--json"], {
     cwd: repo,
@@ -2193,7 +1991,7 @@ test("setup reuses an existing shared app-server without starting another one", 
   assert.equal(setup.status, 0, setup.stderr);
 
   const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
-  assert.equal(fakeState.appServerStarts, 1);
+  assert.equal(fakeState.appServerStarts, 2);
 
   const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
     cwd: repo,
@@ -2206,7 +2004,7 @@ test("setup reuses an existing shared app-server without starting another one", 
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("status reports shared session runtime when a lazy broker is active", () => {
+test("status reports independently owned runtimes", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -2222,9 +2020,6 @@ test("status reports shared session runtime when a lazy broker is active", () =>
   });
   assert.equal(review.status, 0, review.stderr);
 
-  if (!loadBrokerSession(repo)) {
-    return;
-  }
 
   const result = run("node", [SCRIPT, "status"], {
     cwd: repo,
@@ -2232,28 +2027,14 @@ test("status reports shared session runtime when a lazy broker is active", () =>
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Session runtime: shared session/);
+  assert.match(result.stdout, /Session runtime: owned runtime/);
 });
 
-test("setup and status honor --cwd when reading shared session runtime", () => {
-  const targetWorkspace = makeTempDir();
-  const invocationWorkspace = makeTempDir();
-
-  saveBrokerSession(targetWorkspace, {
-    endpoint: "unix:/tmp/fake-broker.sock"
-  });
-
-  const status = run("node", [SCRIPT, "status", "--cwd", targetWorkspace], {
-    cwd: invocationWorkspace
-  });
-  assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, /Session runtime: shared session/);
-
-  const setup = run("node", [SCRIPT, "setup", "--cwd", targetWorkspace, "--json"], {
-    cwd: invocationWorkspace
-  });
-  assert.equal(setup.status, 0, setup.stderr);
-  const payload = JSON.parse(setup.stdout);
-  assert.equal(payload.sessionRuntime.mode, "shared");
-  assert.equal(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
+test("setup and status honor --cwd for workspace configuration", () => {
+ const targetWorkspace=makeTempDir(), invocationWorkspace=makeTempDir(), bin=makeTempDir();installFakeCodex(bin);
+ setConfig(targetWorkspace,"stopReviewGate",true);
+ const setup=run("node",[SCRIPT,"setup","--cwd",targetWorkspace,"--json"],{cwd:invocationWorkspace,env:buildEnv(bin)});
+ assert.equal(setup.status,0,setup.stderr);assert.equal(JSON.parse(setup.stdout).reviewGateEnabled,true);
+ const status=run("node",[SCRIPT,"status","--cwd",targetWorkspace],{cwd:invocationWorkspace});
+ assert.equal(status.status,0,status.stderr);assert.match(status.stdout,/Session runtime: owned runtime/);
 });

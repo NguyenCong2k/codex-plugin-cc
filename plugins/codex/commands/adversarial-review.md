@@ -5,7 +5,10 @@ disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 
-Run an adversarial Codex review through the shared plugin runtime.
+Transport: pass the raw slash arguments through the quoted heredoc below. Choose a fresh delimiter if CODEX_ARGS appears as a complete line in the arguments. Never interpolate raw user text into shell quotes or a JavaScript expression.
+
+
+Run an adversarial Codex review through the owned plugin runtime.
 Position it as a challenge review that questions the chosen implementation, design choices, tradeoffs, and assumptions.
 It is not just a stricter pass over implementation defects.
 
@@ -47,7 +50,9 @@ Argument handling:
 Foreground flow:
 - Run:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" adversarial-review "$ARGUMENTS"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" adversarial-review --arguments-stdin <<'CODEX_ARGS'
+$ARGUMENTS
+CODEX_ARGS
 ```
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.
@@ -55,12 +60,6 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" adversarial-review "$AR
 
 Background flow:
 - Launch the review with `Bash` in the background:
-```typescript
-Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" adversarial-review "$ARGUMENTS"`,
-  description: "Codex adversarial review",
-  run_in_background: true
-})
-```
-- Do not call `BashOutput` or wait for completion in this turn.
+Use the foreground command above in a Bash call with `run_in_background: true`. Pass the heredoc as a literal tool argument, not a JavaScript expression assembled from user text.
+- Return the background job ID immediately; retrieve its result when the user asks.
 - After launching the command, tell the user: "Codex adversarial review started in the background. Check `/codex:status` for progress."

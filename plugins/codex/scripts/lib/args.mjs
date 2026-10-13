@@ -21,11 +21,14 @@ export function parseArgs(argv, config = {}) {
 
     if (!token.startsWith("-") || token === "-") {
       positionals.push(token);
+      if (config.stopAtPositional) passthrough = true;
       continue;
     }
 
     if (token.startsWith("--")) {
-      const [rawKey, inlineValue] = token.slice(2).split("=", 2);
+      const equals = token.indexOf("=");
+      const rawKey = token.slice(2, equals === -1 ? undefined : equals);
+      const inlineValue = equals === -1 ? undefined : token.slice(equals + 1);
       const key = aliasMap[rawKey] ?? rawKey;
 
       if (booleanOptions.has(key)) {
@@ -74,55 +77,18 @@ export function parseArgs(argv, config = {}) {
 }
 
 export function splitRawArgumentString(raw) {
-  const tokens = [];
-  let current = "";
-  let quote = null;
-  let escaping = false;
-
-  for (const character of raw) {
-    if (escaping) {
-      current += character;
-      escaping = false;
-      continue;
+  const tokens = []; let current = "", quote = null, started = false;
+  for (let index = 0; index < raw.length; index++) {
+    const character = raw[index], next = raw[index + 1];
+    if (character === "\\" && quote !== "'" && (next === '"' || (!quote && (next === "'" || /\s/.test(next ?? ""))))) {
+      current += next; index++; started = true; continue;
     }
-
-    if (character === "\\") {
-      escaping = true;
-      continue;
-    }
-
-    if (quote) {
-      if (character === quote) {
-        quote = null;
-      } else {
-        current += character;
-      }
-      continue;
-    }
-
-    if (character === "'" || character === "\"") {
-      quote = character;
-      continue;
-    }
-
-    if (/\s/.test(character)) {
-      if (current) {
-        tokens.push(current);
-        current = "";
-      }
-      continue;
-    }
-
-    current += character;
+    if (quote) { if (character === quote) quote = null; else current += character; started = true; continue; }
+    if (character === "'" || character === '"') { quote = character; started = true; continue; }
+    if (/\s/.test(character)) { if (started) { tokens.push(current); current = ""; started = false; } continue; }
+    current += character; started = true;
   }
-
-  if (escaping) {
-    current += "\\";
-  }
-
-  if (current) {
-    tokens.push(current);
-  }
-
+  if (quote) throw new Error("Unterminated quote in slash-command arguments.");
+  if (started) tokens.push(current);
   return tokens;
 }

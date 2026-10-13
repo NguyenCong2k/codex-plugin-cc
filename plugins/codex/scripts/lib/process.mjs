@@ -1,22 +1,50 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
+import fs from "node:fs";
+import path from "node:path";
+
+export function executableInvocation(command, args = [], env = process.env) {
+  if (command === "node") return { command: process.execPath, args };
+  if (process.platform !== "win32") return { command, args };
+  const envPath = Object.entries(env).find(([key]) => key.toLowerCase() === "path")?.[1] ?? "";
+  const candidates = path.isAbsolute(command) ? [command] : String(envPath).split(path.delimiter).flatMap(dir =>
+    [command, `${command}.exe`, `${command}.com`, `${command}.cmd`].map(name => path.join(dir, name)));
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) continue;
+    if (/\.(exe|com)$/i.test(candidate)) return { command: candidate, args };
+    const base = candidate.replace(/\.cmd$/i, "");
+    if (fs.existsSync(base) && /^#!.*\bnode\b/.test(fs.readFileSync(base, "utf8").slice(0, 160))) {
+      return { command: process.execPath, args: [base, ...args] };
+    }
+    const knownShim = command === "npm" ? "npm/bin/npm-cli.js" : command === "codex" ? "@openai/codex/bin/codex.js" : null;
+    if (knownShim) {
+      const script = path.join(path.dirname(candidate), "node_modules", knownShim);
+      if (fs.existsSync(script)) return { command: process.execPath, args: [script, ...args] };
+    }
+  }
+  throw Object.assign(new Error(`Executable not found (use a native executable or Node shim): ${command}`), { code: "ENOENT" });
+}
 
 export function runCommand(command, args = [], options = {}) {
-  const result = spawnSync(command, args, {
+  let invocation;
+  try { invocation = executableInvocation(command, args, options.env ?? process.env); }
+  catch (error) { return { command, args, status: 1, signal: null, stdout: "", stderr: "", error }; }
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: options.cwd,
     env: options.env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: options.maxBuffer,
     stdio: options.stdio ?? "pipe",
-    shell: options.shell ?? (process.platform === "win32" ? (process.env.SHELL || true) : false),
+    shell: false,
+    timeout: options.timeout ?? 15000,
     windowsHide: true
   });
 
   return {
     command,
     args,
-    status: result.status ?? 0,
+    status: result.status ?? 1,
     signal: result.signal ?? null,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
@@ -55,7 +83,7 @@ function looksLikeMissingProcessMessage(text) {
 }
 
 export function terminateProcessTree(pid, options = {}) {
-  if (!Number.isFinite(pid)) {
+  if (!Number.isInteger(pid) || pid <= 0) {
     return { attempted: false, delivered: false, method: null };
   }
 
@@ -66,7 +94,8 @@ export function terminateProcessTree(pid, options = {}) {
   if (platform === "win32") {
     const result = runCommandImpl("taskkill", ["/PID", String(pid), "/T", "/F"], {
       cwd: options.cwd,
-      env: options.env
+      env: options.env,
+      shell: false
     });
 
     if (!result.error && result.status === 0) {
@@ -74,6 +103,8 @@ export function terminateProcessTree(pid, options = {}) {
     }
 
     const combinedOutput = `${result.stderr}\n${result.stdout}`.trim();
+    try { killImpl(pid, 0); }
+    catch (error) { if (error.code === "ESRCH") return { attempted: true, delivered: false, method: "taskkill", result }; }
     if (!result.error && looksLikeMissingProcessMessage(combinedOutput)) {
       return { attempted: true, delivered: false, method: "taskkill", result };
     }
@@ -101,7 +132,7 @@ export function terminateProcessTree(pid, options = {}) {
     killImpl(-pid, "SIGTERM");
     return { attempted: true, delivered: true, method: "process-group" };
   } catch (error) {
-    if (error?.code !== "ESRCH") {
+    {
       try {
         killImpl(pid, "SIGTERM");
         return { attempted: true, delivered: true, method: "process" };

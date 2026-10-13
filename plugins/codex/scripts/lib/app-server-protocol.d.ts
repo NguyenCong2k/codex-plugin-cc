@@ -51,9 +51,6 @@ export interface CodexAppServerClientOptions {
   env?: NodeJS.ProcessEnv;
   clientInfo?: ClientInfo;
   capabilities?: InitializeCapabilities;
-  brokerEndpoint?: string;
-  disableBroker?: boolean;
-  reuseExistingBroker?: boolean;
 }
 
 export interface AppServerMethodMap {
