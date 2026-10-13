@@ -5,7 +5,16 @@ disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
 
-!`node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" status --arguments "$ARGUMENTS"`
+Transport: pass the raw slash arguments through the quoted heredoc below. Choose a fresh delimiter if CODEX_ARGS appears as a complete line in the arguments. Never interpolate raw user text into shell quotes or a JavaScript expression.
+
+
+Run this command once with Bash:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" status --arguments-stdin <<'CODEX_ARGS'
+$ARGUMENTS
+CODEX_ARGS
+```
 
 If the user did not pass a job ID:
 - Render the command output as a single Markdown table for the current and past runs in this session.

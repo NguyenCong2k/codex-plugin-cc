@@ -4,10 +4,16 @@ argument-hint: '[--enable-review-gate|--disable-review-gate]'
 allowed-tools: Bash(node:*), Bash(npm:*), AskUserQuestion
 ---
 
+Transport: pass the raw slash arguments through the quoted heredoc below. Choose a fresh delimiter if CODEX_ARGS appears as a complete line in the arguments. Never interpolate raw user text into shell quotes or a JavaScript expression.
+
+
 Run:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" setup --arguments "$ARGUMENTS"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" setup --arguments-stdin <<'CODEX_ARGS'
+--json
+$ARGUMENTS
+CODEX_ARGS
 ```
 
 If the result says Codex is unavailable and npm is available:
@@ -25,7 +31,10 @@ npm install -g @openai/codex
 - Then rerun:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" setup --arguments "$ARGUMENTS"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" setup --arguments-stdin <<'CODEX_ARGS'
+--json
+$ARGUMENTS
+CODEX_ARGS
 ```
 
 If Codex is already installed or npm is unavailable:

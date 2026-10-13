@@ -136,7 +136,8 @@ function normalizeArgv(argv) {
 
 function parseCommandInput(argv, config = {}) {
   const actual = argv[0] === "--arguments" && argv.length === 2 ? splitRawArgumentString(argv[1])
-    : argv[0] === "--arguments-file" && argv.length === 2 ? splitRawArgumentString(fs.readFileSync(argv[1], "utf8")) : normalizeArgv(argv);
+    : argv[0] === "--arguments-file" && argv.length === 2 ? splitRawArgumentString(fs.readFileSync(argv[1], "utf8"))
+    : argv[0] === "--arguments-stdin" && argv.length === 1 ? splitRawArgumentString(readStdinIfPiped()) : normalizeArgv(argv);
   return parseArgs(actual, {
     ...config,
     aliasMap: {

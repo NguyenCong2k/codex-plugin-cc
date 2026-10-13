@@ -40,4 +40,6 @@ State intentionally moved away from temporary or ambient plugin data roots. Old 
 
 Windows Node 25.8.0: full fixture suite, concurrency tests and build. Typecheck covers all plugin runtime JavaScript. A real Codex CLI 0.161.0 initialized, answered `config/read`, and its owned guardian exited after close; no model turn was invoked for this smoke check.
 
+The first committed revision passed 107 local tests and both Ubuntu CI targets. A subsequent transport revision uses quoted stdin for slash commands; its shell-expansion regression runs on POSIX and is explicitly skipped on native Windows.
+
 CI additionally runs Ubuntu Node 18.18/22 and Windows Node 22. Live Claude Code slash-command invocation, real model effects, interactive approvals/elicitation, and abnormal MCP descendant cleanup have not been certified locally. Interactive requests deliberately fail with resume guidance. PID liveness is diagnostic only; no persisted PID is used as kill authority.

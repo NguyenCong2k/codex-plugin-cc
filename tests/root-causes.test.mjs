@@ -159,6 +159,14 @@ test("explicit raw slash transport preserves Windows paths and rejects broken qu
   const name = buildPersistentTaskThreadName("a".repeat(52) + "😀" + "long remaining prompt");
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(name));
 });
+test("quoted stdin transport never evaluates shell metacharacters in review arguments", { skip: process.platform === "win32" }, () => {
+  const cwd = makeTempDir(), bin = makeTempDir(); initGitRepo(cwd); installFakeCodex(bin);
+  const marker = path.join(cwd, "must-not-exist"), script = path.resolve("plugins/codex/scripts/codex-companion.mjs");
+  const shell = `node "${script}" review --arguments-stdin <<'CODEX_ARGS'\n--base "feature$(touch ${marker})"\nCODEX_ARGS`;
+  const result = run("sh", ["-c", shell], { cwd, env: buildEnv(bin) });
+  assert.equal(result.status, 0, result.stderr); assert.equal(fs.existsSync(marker), false);
+  assert.ok(result.stdout.includes(`feature$(touch ${marker})`));
+});
 test("import correlation tolerates a growing source and Windows canonical prefixes without accepting stale records", () => {
   const dir = makeTempDir(), source = path.join(dir, "session.jsonl"), previous = process.env.CODEX_HOME;
   process.env.CODEX_HOME = dir; fs.writeFileSync(source, "before\n");

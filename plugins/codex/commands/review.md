@@ -5,6 +5,9 @@ disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 
+Transport: pass the raw slash arguments through the quoted heredoc below. Choose a fresh delimiter if CODEX_ARGS appears as a complete line in the arguments. Never interpolate raw user text into shell quotes or a JavaScript expression.
+
+
 Run a Codex review through the built-in reviewer through an owned runtime.
 
 Raw slash-command arguments:
@@ -42,7 +45,9 @@ Argument handling:
 Foreground flow:
 - Run:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --arguments "$ARGUMENTS"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --arguments-stdin <<'CODEX_ARGS'
+$ARGUMENTS
+CODEX_ARGS
 ```
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.
@@ -50,12 +55,6 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --arguments "$AR
 
 Background flow:
 - Launch the review with `Bash` in the background:
-```typescript
-Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --arguments "$ARGUMENTS"`,
-  description: "Codex review",
-  run_in_background: true
-})
-```
+Use the foreground command above in a Bash call with `run_in_background: true`. Pass the heredoc as a literal tool argument, not a JavaScript expression assembled from user text.
 - Return the background job ID immediately; retrieve its result when the user asks.
 - After launching the command, tell the user: "Codex review started in the background. Check `/codex:status` for progress."

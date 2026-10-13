@@ -9,7 +9,7 @@ test("review commands explicitly separate slash argument transport from task tex
   for (const command of ["review", "adversarial-review"]) {
     const source = read(`commands/${command}.md`);
     assert.match(source, /review-only/i);
-    assert.match(source, new RegExp(`${command} --arguments "\\$ARGUMENTS"`));
+    assert.match(source, new RegExp(`${command} --arguments-stdin`));
     assert.match(source, /Do not fix issues/i);
     assert.match(source, /run_in_background:\s*true/);
     assert.match(source, /return Codex's output verbatim/i);
@@ -34,6 +34,6 @@ test("lifecycle and deterministic commands remain exposed", () => {
   assert.deepEqual(names, ["adversarial-review.md", "cancel.md", "rescue.md", "result.md", "review.md", "setup.md", "status.md", "transfer.md"]);
   const hooks = JSON.parse(read("hooks/hooks.json"));
   assert.ok(hooks.hooks.SessionStart && hooks.hooks.SessionEnd && hooks.hooks.Stop);
-  for (const name of ["transfer", "result", "cancel", "status"]) assert.match(read(`commands/${name}.md`), /--arguments "\$ARGUMENTS"/);
+  for (const name of ["transfer", "result", "cancel", "status"]) assert.match(read(`commands/${name}.md`), /--arguments-stdin/);
   assert.match(read("commands/setup.md"), /npm install -g @openai\/codex/);
 });

@@ -29,7 +29,7 @@ The defaults are a 30-second RPC deadline and a 30-minute turn budget. Override 
 
 State is kept in `~/.codex-plugin-cc`, independent of `CLAUDE_PLUGIN_DATA`. Set `CODEX_COMPANION_STATE_HOME` to a private directory to choose another location. Old temporary state and broker processes are not imported or signalled automatically. Re-enable the review gate with `/codex:setup --enable-review-gate` after migrating; keep the old installation available if you need to retrieve its old job history.
 
-Rescue uses a prompt file and grants write access only for an authorized edit request. Direct CLI task calls parse flags only before the first positional prompt; use `--` or `--prompt-file` to preserve text that begins with a flag. Slash-command wrappers explicitly use `--arguments`; `--arguments-file` is also available for a quoted heredoc or another literal file transport.
+Rescue uses a prompt file and grants write access only for an authorized edit request. Direct CLI task calls parse flags only before the first positional prompt; use `--` or `--prompt-file` to preserve text that begins with a flag. Slash-command wrappers use `--arguments-stdin` with a quoted heredoc, so shell metacharacters in arguments stay literal. `--arguments-file` and explicit `--arguments` are also available to callers using a safe literal argv/file transport.
 
 Interactive approvals, elicitation and credential refresh callbacks require an interactive Codex client. The helper reports that requirement and the saved thread ID instead of manufacturing consent or claiming a successful run. Model and reasoning-effort values are forwarded to Codex for validation, so new server-supported values do not require a plugin-side allowlist update.
 
