@@ -5,7 +5,7 @@ disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 
-Run a Codex review through the shared built-in reviewer.
+Run a Codex review through the built-in reviewer through an owned runtime.
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -42,7 +42,7 @@ Argument handling:
 Foreground flow:
 - Run:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review "$ARGUMENTS"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --arguments "$ARGUMENTS"
 ```
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.
@@ -52,10 +52,10 @@ Background flow:
 - Launch the review with `Bash` in the background:
 ```typescript
 Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review "$ARGUMENTS"`,
+  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --arguments "$ARGUMENTS"`,
   description: "Codex review",
   run_in_background: true
 })
 ```
-- Do not call `BashOutput` or wait for completion in this turn.
+- Return the background job ID immediately; retrieve its result when the user asks.
 - After launching the command, tell the user: "Codex review started in the background. Check `/codex:status` for progress."

@@ -1,7 +1,6 @@
 ---
 name: codex-rescue
-description: Proactively use when Claude Code is stuck, wants a second implementation or diagnosis pass, needs a deeper root-cause investigation, or should hand a substantial coding task to Codex through the shared runtime
-model: sonnet
+description: Use when the user asks to delegate or approves a proposed handoff and Claude Code is stuck, wants a second implementation or diagnosis pass, needs a deeper root-cause investigation, or should hand a substantial coding task to Codex through the owned runtime
 tools: Bash
 skills:
   - codex-cli-runtime
@@ -14,12 +13,12 @@ Your only job is to forward the user's rescue request to the Codex companion scr
 
 Selection guidance:
 
-- Do not wait for the user to explicitly ask for Codex. Use this subagent proactively when the main Claude thread should hand a substantial debugging or implementation task to Codex.
+- Delegate only within the user-authorized task; a request to diagnose or review does not authorize edits.
 - Do not grab simple asks that the main Claude thread can finish quickly on its own.
 
 Forwarding rules:
 
-- Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task ...`.
+- Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task [runtime options] --prompt-file <prompt-file>`.
 - If the user did not explicitly choose `--background` or `--wait`, prefer foreground for a small, clearly bounded rescue request.
 - If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution.
 - You may use the `gpt-5-4-prompting` skill only to tighten the user's request into a better Codex prompt before forwarding it.
@@ -31,15 +30,15 @@ Forwarding rules:
 - If the user asks for `spark`, map that to `--model gpt-5.3-codex-spark`.
 - If the user asks for a concrete model name such as `gpt-5.4-mini`, pass it through with `--model`.
 - Treat `--effort <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
-- Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
+- Add `--write` only for an authorized request to edit or fix code. Diagnosis, review and research run read-only.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
 - `--resume` means add `--resume-last`.
 - `--fresh` means do not add `--resume-last`.
 - If the user is clearly asking to continue prior Codex work in this repository, such as "continue", "keep going", "resume", "apply the top fix", or "dig deeper", add `--resume-last` unless `--fresh` is present.
 - Otherwise forward the task as a fresh `task` run.
-- Preserve the user's task text as-is apart from stripping routing flags.
+- Preserve the user's task text as-is apart from stripping routing flags. Write that text into a UTF-8 prompt file using a quoted heredoc in the same Bash call; invoke `task --prompt-file <path>` with runtime options as separate argv. Delete the temporary prompt file after the helper returns. Never interpolate task prose into shell code or pass it as raw CLI arguments.
 - Return the stdout of the `codex-companion` command exactly as-is.
-- If the Bash call fails or Codex cannot be invoked, return nothing.
+- If the Bash call fails or Codex cannot be invoked, return the actionable error, job ID and session ID if known. Never return a blank success.
 
 Response style:
 

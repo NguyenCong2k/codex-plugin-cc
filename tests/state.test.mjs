@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { makeTempDir } from "./helpers.mjs";
 import { resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
 
-test("resolveStateDir uses a temp-backed per-workspace directory", () => {
+test("resolveStateDir uses the isolated per-workspace state root", () => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
 
@@ -16,26 +16,26 @@ test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   assert.match(stateDir, new RegExp(`^${os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 });
 
-test("resolveStateDir uses CLAUDE_PLUGIN_DATA when it is provided", () => {
+test("resolveStateDir uses CODEX_COMPANION_STATE_HOME when it is provided", () => {
   const workspace = makeTempDir();
   const pluginDataDir = makeTempDir();
-  const previousPluginDataDir = process.env.CLAUDE_PLUGIN_DATA;
-  process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
+  const previousPluginDataDir = process.env.CODEX_COMPANION_STATE_HOME;
+  process.env.CODEX_COMPANION_STATE_HOME = pluginDataDir;
 
   try {
     const stateDir = resolveStateDir(workspace);
 
-    assert.equal(stateDir.startsWith(path.join(pluginDataDir, "state")), true);
+    assert.equal(stateDir.startsWith(pluginDataDir), true);
     assert.match(path.basename(stateDir), /.+-[a-f0-9]{16}$/);
     assert.match(
       stateDir,
-      new RegExp(`^${path.join(pluginDataDir, "state").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)
+      new RegExp(`^${pluginDataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)
     );
   } finally {
     if (previousPluginDataDir == null) {
-      delete process.env.CLAUDE_PLUGIN_DATA;
+      delete process.env.CODEX_COMPANION_STATE_HOME;
     } else {
-      process.env.CLAUDE_PLUGIN_DATA = previousPluginDataDir;
+      process.env.CODEX_COMPANION_STATE_HOME = previousPluginDataDir;
     }
   }
 });

@@ -390,6 +390,12 @@ export function renderJobStatusReport(job) {
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
+  if (job.status === "failed" || job.status === "cancelled") {
+    const reason = storedJob?.errorMessage || job.errorMessage || `Codex job ${job.status}.`;
+    const partial = storedJob?.result?.rawOutput;
+    return [`Status: ${job.status}`, reason, partial ? `Captured partial output:\n${partial}` : "",
+      threadId ? `Codex session ID: ${threadId}\nResume in Codex: ${resumeCommand}` : ""].filter(Boolean).join("\n") + "\n";
+  }
   if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
     if (!threadId) {
@@ -449,7 +455,7 @@ export function renderCancelReport(job) {
   const lines = [
     "# Codex Cancel",
     "",
-    `Cancelled ${job.id}.`,
+    job.status === "cancelled" ? `Cancelled ${job.id}.` : `Job ${job.id} finished as ${job.status} before cancellation was acknowledged.`,
     ""
   ];
 
