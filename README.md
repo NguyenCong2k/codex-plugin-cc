@@ -13,7 +13,7 @@ they already have.
 
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
-- `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
+- `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:respond`, `/codex:result`, and `/codex:cancel` to delegate work, answer interactive requests, hand off sessions, and manage background jobs
 
 ## Requirements
 
@@ -31,7 +31,7 @@ State is kept in `~/.codex-plugin-cc`, independent of `CLAUDE_PLUGIN_DATA`. Set 
 
 Rescue uses a prompt file and grants write access only for an authorized edit request. Direct CLI task calls parse flags only before the first positional prompt; use `--` or `--prompt-file` to preserve text that begins with a flag. Slash-command wrappers use `--arguments-stdin` with a quoted heredoc, so shell metacharacters in arguments stay literal. `--arguments-file` and explicit `--arguments` are also available to callers using a safe literal argv/file transport.
 
-Interactive approvals, elicitation and credential refresh callbacks require an interactive Codex client. The helper reports that requirement and the saved thread ID instead of manufacturing consent or claiming a successful run. Model and reasoning-effort values are forwarded to Codex for validation, so new server-supported values do not require a plugin-side allowlist update.
+Interactive approvals and elicitation requests are bridged through the owning job. The job pauses with a request id, `/codex:respond <job-id>` (or the rescue agent) submits the exact decision/form response, and the same app-server turn continues. The bridge never manufactures consent; credential refresh remains an explicit handoff to an interactive Codex client. Model and reasoning-effort values are forwarded to Codex for validation, so new server-supported values do not require a plugin-side allowlist update.
 
 ## Receiving upstream updates
 
@@ -227,6 +227,16 @@ Use it to:
 - see the latest completed job
 - confirm whether a task is still running
 
+If a job is waiting for Codex approval or MCP input, the status includes the request kind and response command. Answer it with `/codex:respond <job-id>`; the rescue agent can also ask the question and submit the response for you.
+
+### `/codex:respond`
+
+Answers one pending approval or elicitation request. The command displays the request details, asks for an explicit choice or structured form values, and sends the exact JSON-RPC response back to the owning job.
+
+```bash
+/codex:respond task-abc123
+```
+
 ### `/codex:result`
 
 Shows the final stored Codex output for a finished job.
@@ -299,7 +309,7 @@ Then check in with:
 
 ## Codex Integration
 
-The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses your installed `codex` executable and configuration. Each job owns a fresh app-server and closes it on completion or interruption. Stored threads remain resumable. Model and approval policy inherit your configuration; the requested read-only/workspace-write sandbox is enforced explicitly per turn. Interactive approval or elicitation requests fail with a resumable thread ID; complete them in interactive Codex.
+The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses your installed `codex` executable and configuration. Each job owns a fresh app-server and closes it on completion or interruption. Stored threads remain resumable. Model and approval policy inherit your configuration; the requested read-only/workspace-write sandbox is enforced explicitly per turn. Approval and elicitation requests pause the owning job and resume after an explicit response; unsupported credential refresh flows still provide a resumable thread for interactive Codex.
 
 ### Common Configurations
 

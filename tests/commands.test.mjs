@@ -31,9 +31,9 @@ test("rescue contract preserves text and cannot silently fail or grant write acc
 });
 test("lifecycle and deterministic commands remain exposed", () => {
   const names = fs.readdirSync(path.join(root, "commands")).sort();
-  assert.deepEqual(names, ["adversarial-review.md", "cancel.md", "rescue.md", "result.md", "review.md", "setup.md", "status.md", "transfer.md"]);
+  assert.deepEqual(names, ["adversarial-review.md", "cancel.md", "rescue.md", "respond.md", "result.md", "review.md", "setup.md", "status.md", "transfer.md"]);
   const hooks = JSON.parse(read("hooks/hooks.json"));
   assert.ok(hooks.hooks.SessionStart && hooks.hooks.SessionEnd && hooks.hooks.Stop);
-  for (const name of ["transfer", "result", "cancel", "status"]) assert.match(read(`commands/${name}.md`), /--arguments-stdin/);
+  for (const name of ["transfer", "result", "cancel", "status", "respond"]) assert.match(read(`commands/${name}.md`), /--arguments-stdin/);
   assert.match(read("commands/setup.md"), /npm install -g @openai\/codex/);
 });

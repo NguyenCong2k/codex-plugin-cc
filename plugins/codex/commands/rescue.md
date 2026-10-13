@@ -38,10 +38,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task-resume-candidate -
 
 Operating rules:
 
-- The subagent is a thin forwarder only. It should use one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task [runtime options] --prompt-file <prompt-file>` and return that command's stdout as-is.
-- Return the Codex companion stdout verbatim to the user.
+- The subagent is a thin forwarder with an interactive bridge. It starts one background task, polls only that task, uses `AskUserQuestion` when Codex requests approval or elicitation, submits the exact JSON response, then returns the stored result as-is.
+- Return the Codex companion result verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
-- Do not ask the subagent to inspect files, monitor progress, poll `/codex:status`, fetch `/codex:result`, call `/codex:cancel`, summarize output, or do follow-up work of its own.
+- Do not ask the subagent to inspect files, call `/codex:cancel`, summarize output, or do follow-up work outside the one task and its interactive requests.
 - Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort.
 - Leave the model unset unless the user explicitly asks for one. If they ask for `spark`, map it to `gpt-5.3-codex-spark`.
 - Leave `--resume` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.

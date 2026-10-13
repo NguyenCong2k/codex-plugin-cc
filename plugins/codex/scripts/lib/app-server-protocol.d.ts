@@ -51,6 +51,7 @@ export interface CodexAppServerClientOptions {
   env?: NodeJS.ProcessEnv;
   clientInfo?: ClientInfo;
   capabilities?: InitializeCapabilities;
+  serverRequestHandler?: (message: { id?: string | number; method?: string; params?: unknown }) => Promise<unknown>;
 }
 
 export interface AppServerMethodMap {

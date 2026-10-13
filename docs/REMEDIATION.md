@@ -8,7 +8,7 @@ Baseline: upstream `db52e28` (1.0.6). Fork: NguyenCong2k/codex-plugin-cc, branch
 - Job state transitions and configuration changes are interprocess transactions. Readers see complete JSON; active jobs are not history eligible for pruning. Terminal state cannot be overwritten by late progress or cancellation races.
 - Cancellation is a persisted request consumed by the owning worker, rather than killing an arbitrary PID read from disk. A worker supervises its owned child and records a terminal outcome.
 - Prompt text and options are separate transports. Only an explicit raw slash-arguments option is tokenized. Task text is never parsed as runtime flags.
-- Headless runs honor configuration but never fabricate interactive consent. Requests requiring a user are rejected with an actionable error and a resumable thread ID.
+- Headless runs honor configuration but never fabricate interactive consent. Approval and elicitation requests are persisted to the owning job, answered through the response command/agent bridge, and delivered back to the same JSON-RPC request.
 
 ## Audit coverage
 
@@ -21,7 +21,7 @@ Baseline: upstream `db52e28` (1.0.6). Fork: NguyenCong2k/codex-plugin-cc, branch
 | F09 | Import correlated to a changing source | Implemented; Windows-path/growing-source fixtures and fake native import |
 | F10, F11 | Shell-dependent execution/build | Implemented; Windows tests/build and POSIX kill injection |
 | F12, F13, F17 | UTF-16 and line-oriented Git parsing | Implemented; Unicode/Git fixtures |
-| F15 and protocol risks | Effective config and unsupported interactive requests | Implemented policy inheritance and explicit fail/resume contract; no interactive consent bridge |
+| F15 and protocol risks | Effective config and unsupported interactive requests | Implemented policy inheritance plus request-id-scoped approval/elicitation bridge; credential refresh still requires interactive Codex |
 
 Tests must exercise concurrent writers, interrupted workers, disconnect/error/missing-ID turns, session isolation, literal prompts, and cleanup. Record hostless and live-host evidence separately. No claims of live Claude Code validation without running it.
 
@@ -42,4 +42,4 @@ Windows Node 25.8.0: full fixture suite, concurrency tests and build. Typecheck 
 
 The first committed revision passed 107 local tests and both Ubuntu CI targets. A subsequent transport revision uses quoted stdin for slash commands; its shell-expansion regression runs on POSIX and is explicitly skipped on native Windows.
 
-CI additionally runs Ubuntu Node 18.18/22 and Windows Node 22. Live Claude Code slash-command invocation, real model effects, interactive approvals/elicitation, and abnormal MCP descendant cleanup have not been certified locally. Interactive requests deliberately fail with resume guidance. PID liveness is diagnostic only; no persisted PID is used as kill authority.
+CI additionally runs Ubuntu Node 18.18/22 and Windows Node 22. Live Claude Code slash-command invocation, real model effects, and abnormal MCP descendant cleanup have not been certified locally. The request bridge is covered by deterministic response and state tests; live Claude Code rendering and user-choice UX still need host validation. PID liveness is diagnostic only; no persisted PID is used as kill authority.

@@ -167,7 +167,8 @@ export async function runTrackedJob(job, runner, options = {}) {
       ...current, status: completionStatus, phase: completionStatus === "completed" ? "done" : completionStatus,
       threadId: execution.threadId ?? current.threadId, turnId: execution.turnId ?? current.turnId,
       pid: null, completedAt: nowIso(), result: execution.payload, rendered: execution.rendered,
-      summary: execution.summary, errorMessage: completionStatus === "cancelled" ? current.cancelReason || "Cancelled by user." : null
+      summary: execution.summary, interaction: null, interactions: [],
+      errorMessage: completionStatus === "cancelled" ? current.cancelReason || "Cancelled by user." : null
     }); });
     appendLogBlock(running.logFile, "Final output", execution.rendered);
     if (completionStatus === "cancelled") throw controller.signal.reason ?? Object.assign(new Error("Cancelled by user."), { code: "JOB_CANCELLED" });
@@ -177,6 +178,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     updateJob(job.workspaceRoot, job.id, current => ({ ...current, status: cancelled ? "cancelled" : "failed",
       phase: cancelled ? "cancelled" : "failed", pid: null, completedAt: nowIso(),
       threadId: error.threadId ?? current.threadId, turnId: error.turnId ?? current.turnId,
+      interaction: null, interactions: [],
       errorMessage: error instanceof Error ? error.message : String(error) }));
     throw error;
   } finally {
