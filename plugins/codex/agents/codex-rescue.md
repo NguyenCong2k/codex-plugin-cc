@@ -36,6 +36,7 @@ Forwarding rules:
 - Otherwise forward the task as a fresh `task` run.
 - Preserve the user's task text as-is apart from stripping routing flags. Write that text into a UTF-8 prompt file using a quoted heredoc; invoke `task --background --json --prompt-file <path>` with runtime options as separate argv. Delete the temporary prompt file after launch. Never interpolate task prose into shell code or pass it as raw CLI arguments.
 - After launch, poll `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" status <job-id> --json`. If `job.interaction` is present, use `AskUserQuestion` exactly once for that request. Do not approve automatically. Submit the exact server response through `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" respond <job-id> --response-stdin` using a quoted heredoc, then resume polling. Poll until the job is terminal and return `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" result <job-id>` stdout exactly as-is.
+- Treat `timed_out` as terminal. Return its stored timeout and resume evidence exactly as-is; never start a replacement task. The parent Claude conversation owns the decision to resume.
 - For approval requests, preserve the server's allowed decisions. For elicitation forms, ask for the requested structured values and preserve the schema. Decline or cancel when the user chooses that. Never collect or echo credentials unnecessarily.
 - If the Bash call fails or Codex cannot be invoked, return the actionable error, job ID and session ID if known. Never return a blank success.
 

@@ -114,6 +114,8 @@ function inferLegacyJobPhase(job, progressPreview = []) {
       return "cancelled";
     case "failed":
       return "failed";
+    case "timed_out":
+      return "timed_out";
     case "completed":
       return "done";
     default:
@@ -164,12 +166,12 @@ export function enrichJob(job, options = {}) {
     ...job,
     kindLabel: getJobTypeLabel(job),
     progressPreview:
-      job.status === "queued" || job.status === "running" || job.status === "failed"
+      job.status === "queued" || job.status === "running" || job.status === "failed" || job.status === "timed_out"
         ? readJobProgressPreview(job.logFile, maxProgressLines)
         : [],
     elapsed: formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? null),
     duration:
-      job.status === "completed" || job.status === "failed" || job.status === "cancelled"
+      job.status === "completed" || job.status === "failed" || job.status === "cancelled" || job.status === "timed_out"
         ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
         : null
   };

@@ -50,6 +50,9 @@ const DEFAULT_CONTINUE_PROMPT =
   "Continue from the current thread state. Pick the next highest-value step and follow through until the task is resolved.";
 const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
 const EXTERNAL_AGENT_IMPORT_TIMEOUT_MS = 2 * 60 * 1000;
+const DEFAULT_TURN_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_TURN_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const TURN_TIMEOUT_WARNING_RATIO = 0.8;
 
 function cleanCodexStderr(stderr) {
   return stderr
@@ -536,34 +539,155 @@ function applyTurnNotification(state, message) {
   }
 }
 
+function formatTimeoutDuration(milliseconds) {
+  const seconds = Math.max(1, Math.round(milliseconds / 1000));
+  if (seconds % 3600 === 0) return `${seconds / 3600} hour${seconds === 3600 ? "" : "s"}`;
+  if (seconds % 60 === 0) return `${seconds / 60} minute${seconds === 60 ? "" : "s"}`;
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+
+function createTurnTimeoutError(kind, state, startedAt, lastActivityAt, limitMs) {
+  const now = Date.now();
+  const idle = kind === "idle";
+  return Object.assign(
+    new Error(
+      idle
+        ? `Codex turn timed out after ${formatTimeoutDuration(limitMs)} without runtime activity. The saved thread and current working tree were preserved. Claude must decide whether to resume; the plugin did not restart it.`
+        : `Codex turn reached its ${formatTimeoutDuration(limitMs)} hard runtime limit. The saved thread and current working tree were preserved. Claude must decide whether to resume; the plugin did not restart it.`
+    ),
+    {
+      name: "CodexTurnTimeoutError",
+      code: idle ? "CODEX_TURN_IDLE_TIMEOUT" : "CODEX_TURN_HARD_TIMEOUT",
+      timeout: {
+        kind,
+        limitMs,
+        elapsedMs: Math.max(0, now - startedAt),
+        inactiveMs: Math.max(0, now - lastActivityAt),
+        threadId: state.threadId,
+        turnId: state.turnId,
+        automaticRestart: false,
+        interruptAcknowledged: false
+      }
+    }
+  );
+}
+
+function createTurnWatchdog(state, options = {}) {
+  const idleTimeoutMs = durationSetting(
+    options.idleTimeoutMs ?? process.env.CODEX_COMPANION_TURN_IDLE_TIMEOUT_MS,
+    DEFAULT_TURN_IDLE_TIMEOUT_MS
+  );
+  const hardTimeoutMs = durationSetting(
+    options.hardTimeoutMs ?? options.timeoutMs ?? process.env.CODEX_COMPANION_TURN_HARD_TIMEOUT_MS ?? process.env.CODEX_COMPANION_TURN_TIMEOUT_MS,
+    DEFAULT_TURN_HARD_TIMEOUT_MS
+  );
+  const startedAt = Date.now();
+  let lastActivityAt = startedAt;
+  let pauseDepth = 0;
+  let settled = false;
+  let idleWarningTimer = null;
+  let idleTimer = null;
+  let hardWarningTimer = null;
+  let hardTimer = null;
+  let rejectTimeout;
+  const promise = new Promise((_, reject) => { rejectTimeout = reject; });
+
+  const clearIdleTimers = () => {
+    clearTimeout(idleWarningTimer);
+    clearTimeout(idleTimer);
+    idleWarningTimer = null;
+    idleTimer = null;
+  };
+  const warn = (kind, limitMs) => {
+    if (settled) return;
+    const label = kind === "idle" ? "idle timeout" : "hard runtime limit";
+    emitProgress(
+      state.onProgress,
+      `Codex turn is approaching its ${formatTimeoutDuration(limitMs)} ${label}; the plugin will preserve the thread and let Claude decide whether to resume.`,
+      null
+    );
+  };
+  const expire = (kind, limitMs) => {
+    if (settled) return;
+    settled = true;
+    clearIdleTimers();
+    clearTimeout(hardWarningTimer);
+    clearTimeout(hardTimer);
+    rejectTimeout(createTurnTimeoutError(kind, state, startedAt, lastActivityAt, limitMs));
+  };
+  const armIdleTimers = () => {
+    clearIdleTimers();
+    if (settled || pauseDepth > 0) return;
+    const elapsedIdle = Date.now() - lastActivityAt;
+    const warningAt = idleTimeoutMs * TURN_TIMEOUT_WARNING_RATIO;
+    if (elapsedIdle < warningAt) {
+      idleWarningTimer = setTimeout(() => warn("idle", idleTimeoutMs), warningAt - elapsedIdle);
+    }
+    idleTimer = setTimeout(() => expire("idle", idleTimeoutMs), Math.max(0, idleTimeoutMs - elapsedIdle));
+  };
+  const touch = () => {
+    if (settled) return;
+    lastActivityAt = Date.now();
+    armIdleTimers();
+  };
+  const pause = () => {
+    if (settled) return;
+    pauseDepth += 1;
+    clearIdleTimers();
+  };
+  const resume = () => {
+    if (settled || pauseDepth === 0) return;
+    pauseDepth -= 1;
+    if (pauseDepth === 0) touch();
+  };
+  const dispose = () => {
+    settled = true;
+    clearIdleTimers();
+    clearTimeout(hardWarningTimer);
+    clearTimeout(hardTimer);
+  };
+
+  hardWarningTimer = setTimeout(() => warn("hard", hardTimeoutMs), hardTimeoutMs * TURN_TIMEOUT_WARNING_RATIO);
+  hardTimer = setTimeout(() => expire("hard", hardTimeoutMs), hardTimeoutMs);
+  armIdleTimers();
+  return { promise, touch, pause, resume, dispose, idleTimeoutMs, hardTimeoutMs };
+}
+
 export async function captureTurn(client, threadId, startRequest, options = {}) {
   if (options.signal?.aborted) throw options.signal.reason ?? new Error("Codex job cancelled.");
   const state = createTurnCaptureState(threadId, options);
   const previousHandler = client.notificationHandler;
+  const watchdog = createTurnWatchdog(state, options);
+  const activity = options.activity ?? null;
+  if (activity) {
+    activity.touch = watchdog.touch;
+    activity.pause = watchdog.pause;
+    activity.resume = watchdog.resume;
+  }
   let startResponded = false;
   const accept = message => {
     if (message.method === "thread/started" || message.method === "thread/name/updated" || belongsToTurn(state, message)) {
+      watchdog.touch();
       applyTurnNotification(state, message);
     } else previousHandler?.(message);
   };
   client.setNotificationHandler(message => {
-    if (!startResponded) state.bufferedNotifications.push(message);
+    if (!startResponded) {
+      watchdog.touch();
+      state.bufferedNotifications.push(message);
+    }
     else accept(message);
   });
-  let timeout;
   const aborted = new Promise((_, reject) => {
     options.signal?.addEventListener("abort", abort, { once: true });
     function abort() { reject(options.signal.reason ?? new Error("Codex job cancelled.")); }
     if (options.signal?.aborted) abort();
     options.cleanupAbort = () => options.signal?.removeEventListener("abort", abort);
   });
-  const timedOut = new Promise((_, reject) => {
-    timeout = setTimeout(() => reject(new Error("Codex turn exceeded its runtime budget. Resume the saved thread to continue.")),
-      durationSetting(options.timeoutMs ?? process.env.CODEX_COMPANION_TURN_TIMEOUT_MS, 30 * 60 * 1000));
-  });
   const disconnected = client.exitPromise.then(() => { throw client.exitError ?? new Error("Codex connection closed before turn completion."); });
   const lifecycle = (async () => {
     const response = await startRequest();
+    watchdog.touch();
     options.onResponse?.(response, state);
     state.turnId = response.turn?.id ?? null;
     if (state.turnId) state.threadTurnIds.set(state.threadId, state.turnId);
@@ -573,39 +697,64 @@ export async function captureTurn(client, threadId, startRequest, options = {}) 
     if (response.turn?.status && response.turn.status !== "inProgress") completeTurn(state, response.turn);
     return state.completion;
   })();
-  try { return await Promise.race([lifecycle, disconnected, timedOut, aborted]); }
+  try { return await Promise.race([lifecycle, disconnected, watchdog.promise, aborted]); }
   catch (error) {
     // Do not retry the turn. Interrupt the same owned runtime, then close it.
+    let interruptAcknowledged = false;
     if (state.turnId && !client.closed) {
-      await Promise.race([client.request("turn/interrupt", { threadId: state.threadId, turnId: state.turnId }).catch(() => {}),
-        new Promise(resolve => setTimeout(resolve, 1000))]);
+      interruptAcknowledged = await Promise.race([
+        client.request("turn/interrupt", { threadId: state.threadId, turnId: state.turnId }).then(() => true).catch(() => false),
+        new Promise(resolve => setTimeout(() => resolve(false), 1000))
+      ]);
+    }
+    if (error?.timeout) {
+      error.timeout = {
+        ...error.timeout,
+        threadId: state.threadId,
+        turnId: state.turnId,
+        interruptAcknowledged
+      };
     }
     throw Object.assign(error, { threadId: state.threadId, turnId: state.turnId });
   } finally {
-    clearTimeout(timeout); options.cleanupAbort?.();
+    watchdog.dispose();
+    if (activity) {
+      activity.touch = () => {};
+      activity.pause = () => {};
+      activity.resume = () => {};
+    }
+    options.cleanupAbort?.();
     clearCompletionTimer(state); client.setNotificationHandler(previousHandler ?? null);
   }
 }
 
 function buildServerRequestHandler(cwd, options = {}) {
   if (!options.jobId || !options.workspaceRoot) return undefined;
-  return message => waitForInteractionResponse({
-    workspaceRoot: options.workspaceRoot,
-    jobId: options.jobId,
-    message,
-    signal: options.signal,
-    timeoutMs: options.interactionTimeoutMs,
-    onProgress: options.onProgress
-  });
+  return async message => {
+    options.activity?.pause();
+    try {
+      return await waitForInteractionResponse({
+        workspaceRoot: options.workspaceRoot,
+        jobId: options.jobId,
+        message,
+        signal: options.signal,
+        timeoutMs: options.interactionTimeoutMs,
+        onProgress: options.onProgress
+      });
+    } finally {
+      options.activity?.resume();
+    }
+  };
 }
 
 async function withAppServer(cwd, fn, options = {}) {
   // A fresh owned process loads the persisted thread and current config. No
   // global runtime, stale credentials, ownership ambiguity, or replay fallback.
+  const activity = { touch() {}, pause() {}, resume() {} };
   const client = await CodexAppServerClient.connect(cwd, {
-    serverRequestHandler: buildServerRequestHandler(cwd, options)
+    serverRequestHandler: buildServerRequestHandler(cwd, { ...options, activity })
   });
-  try { return await fn(client); } finally { await client.close(); }
+  try { return await fn(client, activity); } finally { await client.close(); }
 }
 
 async function withDirectAppServer(cwd, fn) {
@@ -922,7 +1071,7 @@ export async function runAppServerReview(cwd, options = {}) {
     throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
   }
 
-  return withAppServer(cwd, async (client) => {
+  return withAppServer(cwd, async (client, activity) => {
     emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
     const thread = await startThread(client, cwd, {
       model: options.model,
@@ -948,6 +1097,9 @@ export async function runAppServerReview(cwd, options = {}) {
       {
         onProgress: options.onProgress,
         signal: options.signal,
+        activity,
+        idleTimeoutMs: options.idleTimeoutMs,
+        hardTimeoutMs: options.hardTimeoutMs,
         timeoutMs: options.timeoutMs,
         onResponse(response, state) {
           if (response.reviewThreadId) {
@@ -1021,7 +1173,7 @@ export async function runAppServerTurn(cwd, options = {}) {
     throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
   }
 
-  return withAppServer(cwd, async (client) => {
+  return withAppServer(cwd, async (client, activity) => {
     let threadId;
 
     if (options.resumeThreadId) {
@@ -1066,7 +1218,14 @@ export async function runAppServerTurn(cwd, options = {}) {
             ? { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
             : { type: "readOnly", networkAccess: false }
         }),
-      { onProgress: options.onProgress, signal: options.signal, timeoutMs: options.timeoutMs }
+      {
+        onProgress: options.onProgress,
+        signal: options.signal,
+        activity,
+        idleTimeoutMs: options.idleTimeoutMs,
+        hardTimeoutMs: options.hardTimeoutMs,
+        timeoutMs: options.timeoutMs
+      }
     );
 
     return {

@@ -63,7 +63,53 @@ test("a final answer alone never fabricates successful turn completion", async (
   const client = fakeClient();
   const result = captureTurn(client, "thread", async () => ({ turn: { id: "turn", status: "inProgress" } }), { timeoutMs: 30 });
   await delay(1); client.emit("item/completed", { threadId: "thread", turnId: "turn", item: { type: "agentMessage", phase: "final_answer", text: "done" } });
-  await assert.rejects(result, /runtime budget/);
+  await assert.rejects(result, error => error.code === "CODEX_TURN_HARD_TIMEOUT" && error.timeout.interruptAcknowledged === true);
+});
+test("runtime activity resets the idle deadline without extending the hard limit", async () => {
+  const client = fakeClient();
+  const result = captureTurn(client, "thread", async () => ({ turn: { id: "turn", status: "inProgress" } }), {
+    idleTimeoutMs: 40,
+    hardTimeoutMs: 500
+  });
+  const activity = setInterval(() => {
+    client.emit("item/started", { threadId: "thread", turnId: "turn", item: { type: "webSearch", query: "still working" } });
+  }, 20);
+  setTimeout(() => client.emit("turn/completed", { threadId: "thread", turn: { id: "turn", status: "completed" } }), 120);
+  try {
+    assert.equal((await result).finalTurn.status, "completed");
+  } finally {
+    clearInterval(activity);
+  }
+});
+test("the hard limit stops a turn even while runtime activity continues", async () => {
+  const client = fakeClient();
+  const result = captureTurn(client, "thread", async () => ({ turn: { id: "turn", status: "inProgress" } }), {
+    idleTimeoutMs: 100,
+    hardTimeoutMs: 60
+  });
+  const activity = setInterval(() => {
+    client.emit("item/started", { threadId: "thread", turnId: "turn", item: { type: "webSearch", query: "still working" } });
+  }, 15);
+  try {
+    await assert.rejects(result, error => error.code === "CODEX_TURN_HARD_TIMEOUT" && error.timeout.automaticRestart === false);
+  } finally {
+    clearInterval(activity);
+  }
+});
+test("interactive waits pause the idle deadline", async () => {
+  const client = fakeClient();
+  const activity = { touch() {}, pause() {}, resume() {} };
+  const result = captureTurn(client, "thread", async () => ({ turn: { id: "turn", status: "inProgress" } }), {
+    activity,
+    idleTimeoutMs: 30,
+    hardTimeoutMs: 300
+  });
+  await delay(5);
+  activity.pause();
+  await delay(60);
+  activity.resume();
+  client.emit("turn/completed", { threadId: "thread", turn: { id: "turn", status: "completed" } });
+  assert.equal((await result).finalTurn.status, "completed");
 });
 test("cancellation before submission has no startRequest side effect", async () => {
   const controller = new AbortController(); controller.abort(new Error("cancelled before submission"));
@@ -214,6 +260,28 @@ test("cancel/completion races and partial failed output are never rendered as a 
   assert.doesNotMatch(renderCancelReport({ id: "job", status: "completed" }), /Cancelled job/);
   const output = renderStoredJobResult({ id: "job", status: "failed" }, { result: { rawOutput: "partial" }, errorMessage: "lost connection" });
   assert.match(output, /Status: failed/); assert.match(output, /lost connection/); assert.match(output, /partial/);
+});
+test("turn timeouts remain terminal and tell Claude to decide about resuming", async () => {
+  const cwd = makeTempDir();
+  const timeoutError = Object.assign(new Error("Codex turn timed out."), {
+    code: "CODEX_TURN_IDLE_TIMEOUT",
+    threadId: "thread-timeout",
+    turnId: "turn-timeout",
+    timeout: { kind: "idle", limitMs: 900000, elapsedMs: 901000, inactiveMs: 900000, interruptAcknowledged: true, automaticRestart: false }
+  });
+  await assert.rejects(
+    runTrackedJob({ id: "timed", workspaceRoot: cwd, title: "Timed task", status: "queued" }, async () => { throw timeoutError; }),
+    /timed out/
+  );
+  const stored = listJobs(cwd).find(job => job.id === "timed");
+  assert.equal(stored.status, "timed_out");
+  assert.equal(stored.timeout.kind, "idle");
+  assert.equal(stored.resume.decisionOwner, "claude");
+  assert.equal(stored.resume.automatic, false);
+  const output = renderStoredJobResult(stored, stored);
+  assert.match(output, /Status: timed_out/);
+  assert.match(output, /Automatic restart: disabled/);
+  assert.match(output, /\/codex:rescue --resume/);
 });
 test("SessionStart updates keys rather than growing exports, preserving other plugins", () => {
   const dir = makeTempDir(), file = path.join(dir, "env"), previous = process.env.CLAUDE_ENV_FILE;
