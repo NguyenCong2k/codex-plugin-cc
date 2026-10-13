@@ -138,6 +138,11 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.threadId) {
     lines.push(`  Codex session ID: ${job.threadId}`);
   }
+  if (job.interaction) {
+    const request = job.interaction;
+    lines.push(`  Waiting for interactive input: ${request.kind ?? request.method ?? "server request"} (${request.requestId})`);
+    lines.push(`  Respond: /codex:respond ${job.id}`);
+  }
   const resumeCommand = formatCodexResumeCommand(job);
   if (resumeCommand) {
     lines.push(`  Resume in Codex: ${resumeCommand}`);

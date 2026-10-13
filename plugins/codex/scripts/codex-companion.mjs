@@ -65,6 +65,7 @@ import {
   renderStatusReport,
   renderTaskResult
 } from "./lib/render.mjs";
+import { writeInteractionResponse, readPendingInteraction } from "./lib/interaction.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
@@ -84,6 +85,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
+      "  node scripts/codex-companion.mjs respond <job-id> [--action <accept|acceptForSession|decline|cancel>] [--response-file <json>] [--response-stdin] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
     ].join("\n")
   );
@@ -370,7 +372,9 @@ async function executeReviewRun(request) {
       target: reviewTarget,
       model: request.model,
       onProgress: request.onProgress,
-    signal: request.signal
+      signal: request.signal,
+      jobId: request.jobId,
+      workspaceRoot: request.workspaceRoot ?? resolveWorkspaceRoot(request.cwd)
     });
     const payload = {
       review: reviewName,
@@ -413,7 +417,9 @@ async function executeReviewRun(request) {
     model: request.model,
     sandbox: "read-only",
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
-    onProgress: request.onProgress
+    onProgress: request.onProgress,
+    jobId: request.jobId,
+    workspaceRoot: request.workspaceRoot ?? resolveWorkspaceRoot(context.repoRoot)
   });
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
@@ -491,6 +497,8 @@ async function executeTaskRun(request) {
     sandbox: request.write ? "workspace-write" : "read-only",
     onProgress: request.onProgress,
     signal: request.signal,
+    jobId: request.jobId,
+    workspaceRoot,
     persistThread: true,
     threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
   });
@@ -749,7 +757,9 @@ async function handleReviewCommand(argv, config) {
         model: options.model,
         focusText,
         reviewName: config.reviewName,
-        onProgress: progress
+        onProgress: progress,
+        jobId: job.id,
+        workspaceRoot
       }),
     { json: options.json }
   );
@@ -988,6 +998,70 @@ async function handleCancel(argv) {
   } else outputCommandResult(payload, renderCancelReport(latest), options.json);
 }
 
+function readInteractionResponse(cwd, options) {
+  const sources = [Boolean(options["response-file"]), Boolean(options["response-stdin"]), Boolean(options["result-json"]), Boolean(options.action)];
+  if (sources.filter(Boolean).length !== 1) {
+    throw new Error("Choose exactly one of --action, --response-file, --response-stdin, or --result-json.");
+  }
+  if (options["response-file"]) {
+    return JSON.parse(fs.readFileSync(path.resolve(cwd, options["response-file"]), "utf8"));
+  }
+  if (options["response-stdin"]) {
+    return JSON.parse(readStdinIfPiped());
+  }
+  if (options["result-json"]) {
+    return JSON.parse(options["result-json"]);
+  }
+  return null;
+}
+
+function responseForAction(pending, action) {
+  const allowed = new Set(["accept", "acceptForSession", "decline", "cancel"]);
+  if (!allowed.has(action)) throw new Error(`Unsupported interactive action: ${action}`);
+  switch (pending.kind) {
+    case "command-approval":
+    case "file-change-approval":
+      return { decision: action };
+    case "permissions-approval": {
+      const requested = pending.params?.permissions ?? pending.params?.requestedPermissions ?? {};
+      return {
+        permissions: action === "accept" || action === "acceptForSession" ? requested : {},
+        scope: action === "acceptForSession" ? "session" : "turn"
+      };
+    }
+    case "mcp-elicitation":
+      if (action === "accept") throw new Error("MCP elicitation acceptance requires --response-file, --response-stdin, or --result-json so its content is explicit.");
+      return { action, content: null };
+    case "user-input":
+      throw new Error("User-input requests require --response-file, --response-stdin, or --result-json.");
+    default:
+      return { action };
+  }
+}
+
+async function handleRespond(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "response-file", "result-json", "action"],
+    booleanOptions: ["json", "response-stdin"]
+  });
+  const reference = positionals[0];
+  if (!reference) throw new Error("A job id is required for an interactive response.");
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const selected = buildSingleJobSnapshot(cwd, reference).job;
+  const pending = readPendingInteraction(workspaceRoot, selected.id);
+  if (!pending) throw new Error(`Job ${selected.id} is not waiting for interactive input.`);
+  const supplied = readInteractionResponse(cwd, options);
+  const response = options.action ? responseForAction(pending, options.action) : supplied;
+  if (!response || typeof response !== "object" || Array.isArray(response)) throw new Error("Interactive response must be a JSON object.");
+  const payload = writeInteractionResponse(workspaceRoot, selected.id, {
+    requestId: pending.requestId,
+    result: response
+  });
+  outputCommandResult({ jobId: selected.id, requestId: pending.requestId, submitted: true, response: payload.result },
+    `Interactive response submitted for ${selected.id}; Codex will continue the turn.\n`, options.json);
+}
+
 async function main() {
   const [subcommand, ...argv] = process.argv.slice(2);
   if (!subcommand || subcommand === "help" || subcommand === "--help") {
@@ -1021,6 +1095,9 @@ async function main() {
       break;
     case "result":
       handleResult(argv);
+      break;
+    case "respond":
+      await handleRespond(argv);
       break;
     case "task-resume-candidate":
       handleTaskResumeCandidate(argv);

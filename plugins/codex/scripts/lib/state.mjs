@@ -81,6 +81,11 @@ function saveUnlocked(cwd, state) {
       try { fs.unlinkSync(path.join(resolveJobsDir(cwd), `${validId(job.id)}.${suffix}`)); }
       catch (error) { if (error.code !== "ENOENT") throw error; }
     }
+    const prefix = `${validId(job.id)}.`;
+    for (const name of fs.readdirSync(resolveJobsDir(cwd)).filter(candidate => candidate.startsWith(prefix) && candidate.endsWith(".interaction-response.json"))) {
+      try { fs.unlinkSync(path.join(resolveJobsDir(cwd), name)); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+    }
   }
   const next = { version: 2, config: { ...empty().config, ...state.config }, jobs };
   atomicWrite(resolveStateFile(cwd), `${JSON.stringify(next, null, 2)}\n`); return next;
@@ -143,6 +148,7 @@ export function reconcileJobs(cwd) {
   for (const job of changed) updateJob(cwd, job.id, current => {
     if (current.pid !== job.pid || (current.pid && processAlive(current.pid)) || (!current.pid && !expired(current))) return current;
     return { ...current, status: current.cancelRequestedAt ? "cancelled" : "failed", phase: "failed", pid: null,
+      interaction: null, interactions: [],
       completedAt: now(), errorMessage: current.cancelReason || "The owning worker exited before recording a result. Resume the saved Codex thread to continue." };
   });
   return listJobs(cwd);

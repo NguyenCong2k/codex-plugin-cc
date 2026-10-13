@@ -41,6 +41,7 @@ import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
 import { CodexAppServerClient, durationSetting } from "./app-server.mjs";
+import { waitForInteractionResponse } from "./interaction.mjs";
 import { binaryAvailable } from "./process.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
@@ -586,10 +587,24 @@ export async function captureTurn(client, threadId, startRequest, options = {}) 
   }
 }
 
-async function withAppServer(cwd, fn) {
+function buildServerRequestHandler(cwd, options = {}) {
+  if (!options.jobId || !options.workspaceRoot) return undefined;
+  return message => waitForInteractionResponse({
+    workspaceRoot: options.workspaceRoot,
+    jobId: options.jobId,
+    message,
+    signal: options.signal,
+    timeoutMs: options.interactionTimeoutMs,
+    onProgress: options.onProgress
+  });
+}
+
+async function withAppServer(cwd, fn, options = {}) {
   // A fresh owned process loads the persisted thread and current config. No
   // global runtime, stale credentials, ownership ambiguity, or replay fallback.
-  const client = await CodexAppServerClient.connect(cwd);
+  const client = await CodexAppServerClient.connect(cwd, {
+    serverRequestHandler: buildServerRequestHandler(cwd, options)
+  });
   try { return await fn(client); } finally { await client.close(); }
 }
 
@@ -956,7 +971,7 @@ export async function runAppServerReview(cwd, options = {}) {
       error: turnState.error,
       stderr: cleanCodexStderr(client.stderr)
     };
-  });
+  }, options);
 }
 
 export async function importExternalAgentSession(cwd, options = {}) {
@@ -1067,7 +1082,7 @@ export async function runAppServerTurn(cwd, options = {}) {
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
       commandExecutions: turnState.commandExecutions
     };
-  });
+  }, options);
 }
 
 export async function findLatestTaskThread(cwd) {

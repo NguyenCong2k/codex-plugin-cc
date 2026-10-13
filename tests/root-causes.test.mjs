@@ -19,6 +19,7 @@ import { collectReviewContext } from "../plugins/codex/scripts/lib/git.mjs";
 import { handleSessionStart, handleSessionEnd } from "../plugins/codex/scripts/session-lifecycle-hook.mjs";
 import { processAlive, withFileLock } from "../plugins/codex/scripts/lib/storage.mjs";
 import { evaluateStop } from "../plugins/codex/scripts/stop-review-gate-hook.mjs";
+import { waitForInteractionResponse, writeInteractionResponse, readPendingInteraction } from "../plugins/codex/scripts/lib/interaction.mjs";
 
 function fakeClient() {
   let exit;
@@ -82,6 +83,33 @@ test("interactive requests fail visibly without fabricated consent", async () =>
   client.sendMessage = value => { sent = value; };
   client.handleLine(JSON.stringify({ id: 7, method: "mcpServer/elicitation/request", params: {} }));
   assert.equal(sent.error.code, -32005); assert.match(client.exitError.message, /Resume this thread/);
+});
+test("interactive server requests wait for and return the exact user response", async () => {
+  const cwd = makeTempDir();
+  upsertJob(cwd, { id: "interactive", status: "running" });
+  const pending = waitForInteractionResponse({
+    workspaceRoot: cwd,
+    jobId: "interactive",
+    message: { id: 19, method: "item/commandExecution/requestApproval", params: { command: "npm test", threadId: "thread", turnId: "turn" } },
+    timeoutMs: 2000
+  });
+  await waitFor(() => readPendingInteraction(cwd, "interactive")?.requestId === 19);
+  assert.equal(readPendingInteraction(cwd, "interactive").kind, "command-approval");
+  writeInteractionResponse(cwd, "interactive", { requestId: 19, result: { decision: "acceptForSession" } });
+  assert.deepEqual(await pending, { decision: "acceptForSession" });
+  assert.equal(readPendingInteraction(cwd, "interactive"), null);
+});
+test("concurrent interactive requests keep distinct request ids", async () => {
+  const cwd = makeTempDir();
+  upsertJob(cwd, { id: "interactive-many", status: "running" });
+  const first = waitForInteractionResponse({ workspaceRoot: cwd, jobId: "interactive-many", message: { id: "a", method: "item/fileChange/requestApproval", params: {} }, timeoutMs: 2000 });
+  const second = waitForInteractionResponse({ workspaceRoot: cwd, jobId: "interactive-many", message: { id: "b", method: "mcpServer/elicitation/request", params: {} }, timeoutMs: 2000 });
+  await waitFor(() => listJobs(cwd).find(job => job.id === "interactive-many")?.interactions?.length === 2);
+  writeInteractionResponse(cwd, "interactive-many", { requestId: "b", result: { action: "decline", content: null } });
+  writeInteractionResponse(cwd, "interactive-many", { requestId: "a", result: { decision: "accept" } });
+  assert.deepEqual(await first, { decision: "accept" });
+  assert.deepEqual(await second, { action: "decline", content: null });
+  assert.equal(readPendingInteraction(cwd, "interactive-many"), null);
 });
 test("concurrent processes retain every job and configuration", async () => {
   const cwd = makeTempDir(); setConfig(cwd, "stopReviewGate", true);

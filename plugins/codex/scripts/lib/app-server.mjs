@@ -1,6 +1,6 @@
 /**
  * @typedef {import("./app-server-protocol").AppServerNotificationHandler} AppServerNotificationHandler
- * @typedef {import("./app-server-protocol").CodexAppServerClientOptions & { rpcTimeoutMs?: number, signal?: AbortSignal }} ClientOptions
+ * @typedef {import("./app-server-protocol").CodexAppServerClientOptions & { rpcTimeoutMs?: number, signal?: AbortSignal, serverRequestHandler?: (message: object) => Promise<object> }} ClientOptions
  */
 import fs from "node:fs";
 import process from "node:process";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import readline from "node:readline";
 
 const manifest = JSON.parse(fs.readFileSync(new URL("../../.claude-plugin/plugin.json", import.meta.url), "utf8"));
-const capabilities = { experimentalApi: false, requestAttestation: false,
+const capabilities = { experimentalApi: true, mcpServerOpenaiFormElicitation: true, requestAttestation: false,
   optOutNotificationMethods: ["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded", "item/reasoning/textDelta"] };
 export function durationSetting(value, fallback) {
   if (value == null || value === "") return fallback;
@@ -77,17 +77,40 @@ export class CodexAppServerClient {
   }
   notify(method, params = {}) { if (!this.closed && !this.exitResolved) this.sendMessage({ method, params }); }
   sendMessage(message) { this.proc.stdin.write(`${JSON.stringify(message)}\n`); }
+  handleServerRequest(message) {
+    const handler = this.options.serverRequestHandler;
+    if (typeof handler !== "function") {
+      // A noninteractive client must not manufacture approval or credentials.
+      // Surface the requirement and preserve the thread for interactive resume.
+      const detail = `Codex requested ${message.method}, which needs interactive input. Resume this thread in Codex to provide approval or input.`;
+      try { this.sendMessage({ id: message.id, error: { code: -32005, message: detail } }); }
+      catch (error) { this.handleExit(error); return; }
+      this.handleExit(new Error(detail));
+      return;
+    }
+
+    Promise.resolve()
+      .then(() => handler(message))
+      .then(result => {
+        if (result === undefined) throw new Error(`Interactive handler returned no response for ${message.method}.`);
+        if (!this.closed && !this.exitResolved) this.sendMessage({ id: message.id, result });
+      })
+      .catch(error => {
+        const code = Number.isInteger(error?.rpcCode) ? error.rpcCode : -32005;
+        const detail = error instanceof Error ? error.message : String(error);
+        try { if (!this.closed && !this.exitResolved) this.sendMessage({ id: message.id, error: { code, message: detail } }); }
+        catch (sendError) { this.handleExit(sendError); return; }
+        // A rejected interaction cannot be safely replayed or silently accepted.
+        this.handleExit(Object.assign(new Error(detail), { rpcCode: code }));
+      });
+  }
   handleLine(line) {
     if (!line.trim()) return;
     let message;
     try { message = JSON.parse(line); }
     catch (error) { this.handleExit(new Error(`Invalid Codex JSONL: ${error.message}`)); return; }
     if (message.id !== undefined && message.method) {
-      // A noninteractive client must not manufacture approval or credentials.
-      // Surface the requirement and preserve the thread for interactive resume.
-      const detail = `Codex requested ${message.method}, which needs interactive input. Resume this thread in Codex to provide approval or input.`;
-      this.sendMessage({ id: message.id, error: { code: -32005, message: detail } });
-      this.handleExit(new Error(detail)); return;
+      this.handleServerRequest(message); return;
     }
     if (message.id !== undefined) {
       const pending = this.pending.get(message.id); if (!pending) return;
