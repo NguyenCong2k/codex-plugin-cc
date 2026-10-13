@@ -106,6 +106,15 @@ function formatCodexResumeCommand(job) {
   return `codex resume ${job.threadId}`;
 }
 
+function formatTimeoutLimit(milliseconds) {
+  const value = Number(milliseconds);
+  if (!Number.isFinite(value) || value <= 0) return "unknown limit";
+  const seconds = Math.max(1, Math.round(value / 1000));
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
 function appendActiveJobsTable(lines, jobs) {
   lines.push("Active jobs:");
   lines.push("| Job | Kind | Status | Phase | Elapsed | Codex Session ID | Summary | Actions |");
@@ -142,6 +151,14 @@ function pushJobDetails(lines, job, options = {}) {
     const request = job.interaction;
     lines.push(`  Waiting for interactive input: ${request.kind ?? request.method ?? "server request"} (${request.requestId})`);
     lines.push(`  Respond: /codex:respond ${job.id}`);
+  }
+  if (job.status === "timed_out" && job.timeout) {
+    lines.push(`  Timeout: ${job.timeout.kind ?? "turn"} after ${formatTimeoutLimit(job.timeout.limitMs)}`);
+    lines.push(`  Turn interrupt acknowledged: ${job.timeout.interruptAcknowledged ? "yes" : "no"}`);
+    lines.push("  Automatic restart: disabled; Claude decides whether to resume.");
+    if (job.resume?.command) {
+      lines.push(`  Resume through Claude: ${job.resume.command} <continuation instructions>`);
+    }
   }
   const resumeCommand = formatCodexResumeCommand(job);
   if (resumeCommand) {
@@ -353,7 +370,7 @@ export function renderStatusReport(report) {
     lines.push("Latest finished:");
     pushJobDetails(lines, report.latestFinished, {
       showDuration: true,
-      showLog: report.latestFinished.status === "failed"
+      showLog: report.latestFinished.status === "failed" || report.latestFinished.status === "timed_out"
     });
     lines.push("");
   }
@@ -363,7 +380,7 @@ export function renderStatusReport(report) {
     for (const job of report.recent) {
       pushJobDetails(lines, job, {
         showDuration: true,
-        showLog: job.status === "failed"
+        showLog: job.status === "failed" || job.status === "timed_out"
       });
     }
     lines.push("");
@@ -395,10 +412,18 @@ export function renderJobStatusReport(job) {
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
-  if (job.status === "failed" || job.status === "cancelled") {
+  if (job.status === "failed" || job.status === "cancelled" || job.status === "timed_out") {
     const reason = storedJob?.errorMessage || job.errorMessage || `Codex job ${job.status}.`;
     const partial = storedJob?.result?.rawOutput;
-    return [`Status: ${job.status}`, reason, partial ? `Captured partial output:\n${partial}` : "",
+    const timeout = storedJob?.timeout ?? job.timeout;
+    const timeoutGuidance = job.status === "timed_out"
+      ? [
+          timeout ? `Timeout kind: ${timeout.kind}; limit: ${formatTimeoutLimit(timeout.limitMs)}; interrupt acknowledged: ${timeout.interruptAcknowledged ? "yes" : "no"}.` : "",
+          "Automatic restart: disabled. Claude must decide whether the saved thread should continue.",
+          threadId ? "Resume through Claude: /codex:rescue --resume <continuation instructions>" : ""
+        ].filter(Boolean).join("\n")
+      : "";
+    return [`Status: ${job.status}`, reason, timeoutGuidance, partial ? `Captured partial output:\n${partial}` : "",
       threadId ? `Codex session ID: ${threadId}\nResume in Codex: ${resumeCommand}` : ""].filter(Boolean).join("\n") + "\n";
   }
   if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {

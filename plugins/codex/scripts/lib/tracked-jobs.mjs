@@ -145,7 +145,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     ...existing, ...job, status: "running", phase: "starting", pid: process.pid,
     startedAt: nowIso(), heartbeatAt: nowIso(), logFile: options.logFile ?? job.logFile ?? null
   }));
-  if (["cancelled", "completed", "failed"].includes(running.status)) throw new Error("Job is already terminal.");
+  if (["cancelled", "completed", "failed", "timed_out"].includes(running.status)) throw new Error("Job is already terminal.");
   const cancel = reason => controller.abort(Object.assign(new Error(reason), { code: "JOB_CANCELLED" }));
   const poll = () => {
     const stored = readStoredJobOrNull(job.workspaceRoot, job.id);
@@ -175,11 +175,33 @@ export async function runTrackedJob(job, runner, options = {}) {
     return execution;
   } catch (error) {
     const cancelled = error.code === "JOB_CANCELLED" || controller.signal.reason?.code === "JOB_CANCELLED";
-    updateJob(job.workspaceRoot, job.id, current => ({ ...current, status: cancelled ? "cancelled" : "failed",
-      phase: cancelled ? "cancelled" : "failed", pid: null, completedAt: nowIso(),
-      threadId: error.threadId ?? current.threadId, turnId: error.turnId ?? current.turnId,
-      interaction: null, interactions: [],
-      errorMessage: error instanceof Error ? error.message : String(error) }));
+    const timedOut = error?.code === "CODEX_TURN_IDLE_TIMEOUT" || error?.code === "CODEX_TURN_HARD_TIMEOUT";
+    const terminalStatus = cancelled ? "cancelled" : timedOut ? "timed_out" : "failed";
+    const threadId = error.threadId ?? null;
+    const turnId = error.turnId ?? null;
+    updateJob(job.workspaceRoot, job.id, current => ({
+      ...current,
+      status: terminalStatus,
+      phase: terminalStatus,
+      pid: null,
+      completedAt: nowIso(),
+      threadId: threadId ?? current.threadId,
+      turnId: turnId ?? current.turnId,
+      interaction: null,
+      interactions: [],
+      errorCode: typeof error?.code === "string" ? error.code : null,
+      timeout: timedOut ? { ...error.timeout, automaticRestart: false } : null,
+      resume: timedOut && (threadId ?? current.threadId)
+        ? {
+            automatic: false,
+            decisionOwner: "claude",
+            threadId: threadId ?? current.threadId,
+            command: "/codex:rescue --resume"
+          }
+        : null,
+      errorMessage: error instanceof Error ? error.message : String(error)
+    }));
+    if (timedOut) appendLogLine(running.logFile, `Timed out (${error.timeout?.kind ?? "turn"}); automatic restart is disabled.`);
     throw error;
   } finally {
     clearInterval(interval); process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);

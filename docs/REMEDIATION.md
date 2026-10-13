@@ -5,6 +5,7 @@ Baseline: upstream `db52e28` (1.0.6). Fork: NguyenCong2k/codex-plugin-cc, branch
 ## Ownership decisions
 
 - One run owns one app-server process. Persistent thread IDs preserve resume; a workspace-wide detached broker is no longer the default execution owner. SessionEnd must never terminate another session's runtime.
+- Turn supervision uses a resettable inactivity watchdog plus a separate hard limit. A timeout interrupts the exact owned turn, persists resumable evidence, and leaves the continuation decision to Claude instead of replaying work automatically.
 - Job state transitions and configuration changes are interprocess transactions. Readers see complete JSON; active jobs are not history eligible for pruning. Terminal state cannot be overwritten by late progress or cancellation races.
 - Cancellation is a persisted request consumed by the owning worker, rather than killing an arbitrary PID read from disk. A worker supervises its owned child and records a terminal outcome.
 - Prompt text and options are separate transports. Only an explicit raw slash-arguments option is tokenized. Task text is never parsed as runtime flags.

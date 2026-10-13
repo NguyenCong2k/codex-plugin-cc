@@ -6,7 +6,7 @@ import process from "node:process";
 import { atomicWrite, processAlive, readTextFile, withFileLock } from "./storage.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
-const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+const TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
 const active = job => job.status === "queued" || job.status === "running";
 const empty = () => ({ version: 2, config: { stopReviewGate: false }, jobs: [] });
 const now = () => new Date().toISOString();

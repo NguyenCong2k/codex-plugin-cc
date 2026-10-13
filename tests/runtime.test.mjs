@@ -890,7 +890,7 @@ test("task fails visibly when authoritative parent completion is missing", () =>
   });
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /runtime budget/);
+  assert.match(result.stderr, /hard runtime limit/);
 
 });
 
