@@ -274,6 +274,7 @@ if (args[0] !== "app-server") {
 const bootState = loadState();
 bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
 bootState.appServerPid = process.pid;
+bootState.guardianIncidentLog = process.env.CODEX_COMPANION_INCIDENT_LOG || null;
 saveState(bootState);
 
 const rl = readline.createInterface({ input: process.stdin });

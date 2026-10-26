@@ -172,6 +172,19 @@ test("--worktree creates an isolated branch and reports its path in the digest",
   assert.equal(path.resolve(state.lastTurnStart.cwd), path.resolve(digest.worktree));
 });
 
+test("--incident-log reaches the owned runtime environment", () => {
+  const repo = makeRepo();
+  const bin = makeTempDir();
+  const incidentLog = path.join(repo, "incidents", "agent-incidents.md");
+  installFakeCodex(bin);
+
+  const result = runTask(repo, bin, ["--digest", "--incident-log", incidentLog, "inspect the startup path"]);
+  parseDigest(result);
+
+  const state = readFakeState(bin);
+  assert.equal(state.guardianIncidentLog, path.resolve(incidentLog));
+});
+
 test("workspace-write keeps git metadata writable for a linked worktree", () => {
   const repo = makeRepo();
   const bin = makeTempDir();

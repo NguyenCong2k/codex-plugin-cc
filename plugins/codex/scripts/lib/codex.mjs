@@ -822,6 +822,8 @@ async function withAppServer(cwd, fn, options = {}) {
   // global runtime, stale credentials, ownership ambiguity, or replay fallback.
   const activity = { touch() {}, pause() {}, resume() {} };
   const client = await CodexAppServerClient.connect(cwd, {
+    incidentLog: options.incidentLog ?? null,
+    env: options.env,
     serverRequestHandler: buildServerRequestHandler(cwd, { ...options, activity })
   });
   try { return await fn(client, activity); } finally { await client.close(); }
