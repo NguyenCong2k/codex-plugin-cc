@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import {
@@ -410,7 +410,7 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   return findLatestTaskThread(workspaceRoot);
 }
 
-async function executeReviewRun(request) {
+export async function executeReviewRun(request) {
   ensureCodexAvailable(request.cwd);
   ensureGitRepository(request.cwd);
 
@@ -454,6 +454,7 @@ async function executeReviewRun(request) {
     );
     const digest = buildDigest({
       status: result.status === 0 ? "passed" : "error",
+      jobId: request.jobId ?? null,
       threadId: result.threadId,
       turnId: result.turnId,
       summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
@@ -517,6 +518,7 @@ async function executeReviewRun(request) {
   };
   const digest = buildDigest({
     status: reviewDigestStatus(parsed, result),
+    jobId: request.jobId ?? null,
     threadId: result.threadId,
     turnId: result.turnId,
     filesChanged: context.changedFiles,
@@ -547,7 +549,7 @@ async function executeReviewRun(request) {
 }
 
 
-async function executeTaskRun(request) {
+export async function executeTaskRun(request) {
   const workspaceRoot = request.workspaceRoot ?? resolveWorkspaceRoot(request.cwd);
   const executionCwd = request.worktreePath ?? request.cwd;
   ensureCodexAvailable(executionCwd);
@@ -607,6 +609,7 @@ async function executeTaskRun(request) {
   );
   const digest = buildDigest({
     status: inferRunStatus(result.status, result.commandExecutions),
+    jobId: request.jobId ?? null,
     threadId: result.threadId,
     turnId: result.turnId,
     filesChanged: collectChangedFiles(executionCwd, result.touchedFiles, { baseRef: request.baseRef ?? null }),
@@ -1317,8 +1320,10 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+  });
+}
