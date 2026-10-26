@@ -1,5 +1,6 @@
 import fs from "node:fs";
 
+import { digestStateForJobStatus, readLastOutputAt } from "./digest.mjs";
 import { getSessionRuntimeStatus } from "./codex.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile, reconcileJobs } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
@@ -165,6 +166,9 @@ export function enrichJob(job, options = {}) {
   const enriched = {
     ...job,
     kindLabel: getJobTypeLabel(job),
+    state: digestStateForJobStatus(job.status),
+    lastOutputAt: readLastOutputAt(job.logFile) ?? job.updatedAt ?? job.createdAt ?? null,
+    pid: job.pid ?? null,
     progressPreview:
       job.status === "queued" || job.status === "running" || job.status === "failed" || job.status === "timed_out"
         ? readJobProgressPreview(job.logFile, maxProgressLines)
@@ -241,8 +245,30 @@ export function buildStatusSnapshot(cwd, options = {}) {
   };
 }
 
-export function buildSingleJobSnapshot(cwd, reference, options = {}) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
+export function buildCheapStatus(job) {
+  const pending = job.interaction;
+  return {
+    jobId: job.id,
+    status: job.status,
+    state: job.state ?? digestStateForJobStatus(job.status),
+    phase: job.phase ?? null,
+    lastOutputAt: job.lastOutputAt ?? null,
+    pid: job.pid ?? null,
+    logPath: job.logFile ?? null,
+    worktree: job.worktreePath ?? null,
+    digestStatus: job.digest?.status ?? null,
+    interaction: pending
+      ? {
+          kind: pending.kind ?? null,
+          method: pending.method ?? null,
+          requestId: pending.requestId ?? null,
+          command: pending.params?.command ?? null
+        }
+      : null
+  };
+}
+
+export function buildSingleJobSnapshot(cwd, reference, options = {}) {  const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(reconcileJobs(workspaceRoot));
   const selected = matchJobReference(jobs, reference);
   if (!selected) {

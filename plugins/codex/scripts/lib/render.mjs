@@ -138,6 +138,15 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.phase) {
     lines.push(`  Phase: ${job.phase}`);
   }
+  if (job.state) {
+    lines.push(`  State: ${job.state}`);
+  }
+  if (job.lastOutputAt) {
+    lines.push(`  Last output: ${job.lastOutputAt}`);
+  }
+  if (job.pid) {
+    lines.push(`  PID: ${job.pid}`);
+  }
   if (options.showElapsed && job.elapsed) {
     lines.push(`  Elapsed: ${job.elapsed}`);
   }
@@ -209,6 +218,8 @@ export function renderSetupReport(report) {
     `- auth: ${report.auth.detail}`,
     `- session runtime: ${report.sessionRuntime.label}`,
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    `- full access: ${report.fullAccess?.enabled ? `enabled (${report.fullAccess.source})` : "disabled (use --full-access)"}`,
+    `- incident log: ${report.incidentLog?.path ?? "not configured"}`,
     ""
   ];
 

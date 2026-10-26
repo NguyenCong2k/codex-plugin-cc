@@ -277,6 +277,27 @@ function buildAdversarialReviewPrompt(context, focusText) {
   });
 }
 
+function buildReviewDigestPrompt(context, focusText) {
+  const template = loadPromptTemplate(ROOT_DIR, "review-digest");
+  return interpolateTemplate(template, {
+    TARGET_LABEL: context.target.label,
+    USER_FOCUS: focusText || "No extra focus provided.",
+    REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
+    REVIEW_INPUT: context.content
+  });
+}
+
+function reviewDigestStatus(parsed, result) {
+  if (!parsed.parsed) {
+    return "error";
+  }
+  if (result.status !== 0) {
+    return "failed";
+  }
+  const findings = Array.isArray(parsed.parsed.findings) ? parsed.parsed.findings : [];
+  return parsed.parsed.verdict === "approve" && findings.length === 0 ? "passed" : "failed";
+}
+
 function ensureCodexAvailable(cwd) {
   const availability = getCodexAvailability(cwd);
   if (!availability.available) {
@@ -488,6 +509,18 @@ async function executeReviewRun(request) {
     parseError: parsed.parseError,
     reasoningSummary: result.reasoningSummary
   };
+  const digest = buildDigest({
+    status: reviewDigestStatus(parsed, result),
+    threadId: result.threadId,
+    turnId: result.turnId,
+    filesChanged: context.changedFiles,
+    commandExecutions: result.commandExecutions,
+    findings: parsed.parsed?.findings,
+    summary: parsed.parsed?.summary,
+    errorText: parsed.parseError ?? result.error?.message ?? result.stderr,
+    failureTexts: parsed.parsed ? [] : [parsed.rawOutput],
+    worktree: request.worktreePath ?? null
+  });
 
   return {
     exitStatus: result.status,
@@ -499,6 +532,7 @@ async function executeReviewRun(request) {
       targetLabel: context.target.label,
       reasoningSummary: result.reasoningSummary
     }),
+    digest,
     summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
     jobTitle: `Codex ${reviewName}`,
     jobClass: "review",
@@ -508,8 +542,9 @@ async function executeReviewRun(request) {
 
 
 async function executeTaskRun(request) {
-  const workspaceRoot = resolveWorkspaceRoot(request.cwd);
-  ensureCodexAvailable(request.cwd);
+  const workspaceRoot = request.workspaceRoot ?? resolveWorkspaceRoot(request.cwd);
+  const executionCwd = request.worktreePath ?? request.cwd;
+  ensureCodexAvailable(executionCwd);
 
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
@@ -1039,7 +1074,7 @@ async function handleTaskWorker(argv) {
 async function handleStatus(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "timeout-ms", "poll-interval-ms"],
-    booleanOptions: ["json", "all", "wait"]
+    booleanOptions: ["json", "all", "wait", "digest"]
   });
 
   const cwd = resolveCommandCwd(options);
@@ -1051,8 +1086,12 @@ async function handleStatus(argv) {
           pollIntervalMs: options["poll-interval-ms"]
         })
       : buildSingleJobSnapshot(cwd, reference);
-    outputCommandResult(snapshot, renderJobStatusReport(snapshot.job), options.json);
-    if (snapshot.waitTimedOut) { if (!options.json) process.stderr.write("Status wait timed out while the job is still active.\n"); process.exitCode = 1; }
+    if (options.digest) {
+      outputResult(buildCheapStatus(snapshot.job), true);
+    } else {
+      outputCommandResult(snapshot, renderJobStatusReport(snapshot.job), options.json);
+    }
+    if (snapshot.waitTimedOut) { if (!options.json && !options.digest) process.stderr.write("Status wait timed out while the job is still active.\n"); process.exitCode = 1; }
     return;
   }
 
@@ -1061,22 +1100,32 @@ async function handleStatus(argv) {
   }
 
   const report = buildStatusSnapshot(cwd, { all: options.all });
+  if (options.digest) {
+    outputResult({ jobs: [...report.running, ...(report.latestFinished ? [report.latestFinished] : []), ...report.recent].map(buildCheapStatus) }, true);
+    return;
+  }
   outputResult(renderStatusPayload(report, options.json), options.json);
 }
 
 function handleResult(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json"]
+    booleanOptions: ["json", "digest"]
   });
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveResultJob(cwd, reference);
   const storedJob = readStoredJob(workspaceRoot, job.id);
+  const digest = buildDigestFromStoredJob(job, storedJob);
+  if (options.digest) {
+    outputResult(digest, true);
+    return;
+  }
   const payload = {
     job,
-    storedJob
+    storedJob,
+    digest
   };
 
   outputCommandResult(payload, renderStoredJobResult(job, storedJob), options.json);
