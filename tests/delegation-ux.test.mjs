@@ -336,6 +336,26 @@ test("PowerShell preserves the same prompt literally", { skip: process.platform 
   assert.equal(state.lastTurnStart.prompt.trim(), SPECIAL_PROMPT);
 });
 
+test("background task --digest returns the queued JSON payload", () => {
+  const repo = makeRepo();
+  const bin = makeTempDir();
+  installFakeCodex(bin, "slow-task");
+  const env = buildEnv(bin);
+
+  const launch = runTask(repo, bin, ["--background", "--digest", "inspect the queue"], { env });
+  assert.equal(launch.status, 0, launch.stderr);
+  const payload = JSON.parse(launch.stdout);
+  assert.match(payload.jobId, /^task-/);
+  assert.equal(payload.status, "queued");
+  assert.ok(payload.logFile);
+
+  const waited = run("node", [SCRIPT, "status", payload.jobId, "--wait", "--timeout-ms", "15000", "--digest"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(waited.status, 0, waited.stderr);
+});
+
 test("status <job> --digest stays cheap and result --digest returns the stored digest", async () => {
   const repo = makeRepo();
   const bin = makeTempDir();

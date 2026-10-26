@@ -1000,7 +1000,7 @@ async function handleTask(argv) {
       baseRef
     });
     const { payload } = enqueueBackgroundTask(workspaceRoot, job, request);
-    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
+    outputCommandResult(payload, renderQueuedTaskLaunch(payload), Boolean(options.json || options.digest));
     return;
   }
 
