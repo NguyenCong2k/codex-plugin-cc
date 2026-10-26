@@ -47,8 +47,14 @@ export function appendIncident(options = {}) {
   }
   try {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    if (!fs.existsSync(logPath) || fs.statSync(logPath).size === 0) {
-      fs.writeFileSync(logPath, HEADER, "utf8");
+    try {
+      // Exclusive creation keeps a parallel process from truncating an
+      // incident that was appended between the existence check and the write.
+      fs.writeFileSync(logPath, HEADER, { flag: "wx", encoding: "utf8" });
+    } catch (error) {
+      if (error.code !== "EEXIST") {
+        throw error;
+      }
     }
     const timestamp = options.timestamp ?? new Date().toISOString();
     const type = INCIDENT_TYPES.has(options.type) ? options.type : "other";
