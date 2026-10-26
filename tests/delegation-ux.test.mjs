@@ -172,6 +172,27 @@ test("--worktree creates an isolated branch and reports its path in the digest",
   assert.equal(path.resolve(state.lastTurnStart.cwd), path.resolve(digest.worktree));
 });
 
+test("workspace-write keeps git metadata writable for a linked worktree", () => {
+  const repo = makeRepo();
+  const bin = makeTempDir();
+  const branch = "fix/git-metadata";
+  installFakeCodex(bin, "write-file");
+
+  const result = runTask(repo, bin, ["--write", "--worktree", branch, "--digest", "commit inside the worktree"]);
+  const digest = parseDigest(result);
+  const state = readFakeState(bin);
+  const roots = state.lastTurnStart.sandboxPolicy.writableRoots.map((root) => path.resolve(root));
+
+  assert.ok(roots.includes(path.resolve(digest.worktree)), "the worktree itself must remain writable");
+  const gitDir = path.resolve(run("git", ["rev-parse", "--absolute-git-dir"], { cwd: digest.worktree }).stdout.trim());
+  const commonDir = path.resolve(
+    digest.worktree,
+    run("git", ["rev-parse", "--git-common-dir"], { cwd: digest.worktree }).stdout.trim()
+  );
+  assert.ok(roots.includes(gitDir), `writableRoots must include the worktree git dir ${gitDir}`);
+  assert.ok(roots.includes(commonDir), `writableRoots must include the shared git dir ${commonDir}`);
+});
+
 test("digest reports commands, a tests summary, failures and the log path", () => {
   const repo = makeRepo();
   const bin = makeTempDir();

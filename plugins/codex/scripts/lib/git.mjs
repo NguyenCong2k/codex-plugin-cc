@@ -91,6 +91,28 @@ export function getRepoRoot(cwd) {
   return gitChecked(cwd, ["rev-parse", "--show-toplevel"]).stdout.trim();
 }
 
+/**
+ * Absolute git metadata directories that sit outside the checkout root. A
+ * linked worktree keeps its index and HEAD in the parent repository's .git
+ * directory, so a workspace-write sandbox must be allowed to update them for
+ * `git add` / `git commit` to work.
+ */
+export function getGitMetadataDirs(cwd) {
+  const gitDir = git(cwd, ["rev-parse", "--absolute-git-dir"]);
+  if (gitDir.status !== 0) {
+    return [];
+  }
+  const dirs = [gitDir.stdout.trim()];
+  const commonDir = git(cwd, ["rev-parse", "--git-common-dir"]);
+  if (commonDir.status === 0) {
+    const value = commonDir.stdout.trim();
+    if (value) {
+      dirs.push(path.resolve(cwd, value));
+    }
+  }
+  return [...new Set(dirs.filter(Boolean).map((dir) => path.resolve(dir)))];
+}
+
 export function detectDefaultBranch(cwd) {
   const symbolic = git(cwd, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
   if (symbolic.status === 0) {

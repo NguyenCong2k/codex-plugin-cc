@@ -41,6 +41,7 @@ import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
 import { CodexAppServerClient, durationSetting } from "./app-server.mjs";
+import { getGitMetadataDirs } from "./git.mjs";
 import { appendIncident } from "./incidents.mjs";
 import { autoApprovalResponse, describeApprovalRequest, waitForInteractionResponse } from "./interaction.mjs";
 import { binaryAvailable } from "./process.mjs";
@@ -91,12 +92,27 @@ function buildTurnInput(prompt) {
   return [{ type: "text", text: prompt, text_elements: [] }];
 }
 
+function pathWithin(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 function buildSandboxPolicy(cwd, sandbox) {
   if (sandbox === "danger-full-access") {
     return { type: "dangerFullAccess" };
   }
   if (sandbox === "workspace-write") {
-    return { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
+    const writableRoots = [cwd];
+    try {
+      for (const dir of getGitMetadataDirs(cwd)) {
+        if (!pathWithin(cwd, dir)) {
+          writableRoots.push(dir);
+        }
+      }
+    } catch {
+      // Keep the checkout root writable even when git metadata cannot be read.
+    }
+    return { type: "workspaceWrite", writableRoots, networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
   }
   return { type: "readOnly", networkAccess: false };
 }
