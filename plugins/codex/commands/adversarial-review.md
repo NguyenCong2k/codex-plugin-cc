@@ -1,6 +1,6 @@
 ---
 description: Run a Codex review that challenges the implementation approach and design choices
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [focus ...]'
+argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--digest] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -18,7 +18,8 @@ Raw slash-command arguments:
 Core constraint:
 - This command is review-only.
 - Do not fix issues, apply patches, or suggest that you are about to make changes.
-- Your only job is to run the review and return Codex's output verbatim to the user.
+- Your only job is to run the review and return the compact digest verbatim to the user.
+- The digest is JSON: `status`, `findings[]` (file, line, severity, description), `filesChanged[]`, `commandsRun[]`, `testsSummary`, `failures[]`, and `logPath`. Do not expand it into prose or read the full log unless the user asks.
 - Keep the framing focused on whether the current approach is the right one, what assumptions it depends on, and where the design could fail under real-world conditions.
 
 Execution mode rules:
@@ -51,10 +52,11 @@ Foreground flow:
 - Run:
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" adversarial-review --arguments-stdin <<'CODEX_ARGS'
+--digest
 $ARGUMENTS
 CODEX_ARGS
 ```
-- Return the command stdout verbatim, exactly as-is.
+- Return Codex's output verbatim, exactly as-is (the compact digest JSON).
 - Do not paraphrase, summarize, or add commentary before or after it.
 - Do not fix any issues mentioned in the review output.
 
