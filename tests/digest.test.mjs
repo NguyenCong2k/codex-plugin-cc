@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { inferRunStatus } from "../plugins/codex/scripts/lib/digest.mjs";
+import { inferRunStatus, summarizeTests } from "../plugins/codex/scripts/lib/digest.mjs";
 
 test("inferRunStatus reports failure when an earlier test failed and a later command passed", () => {
   const commands = [
@@ -29,4 +29,10 @@ test("inferRunStatus passes when the same failing test is rerun successfully", (
   ];
 
   assert.equal(inferRunStatus(0, commands), "passed");
+});
+
+test("summarizeTests counts a declined test command as failed", () => {
+  const summary = summarizeTests([{ command: "npm test", status: "declined", exitCode: null }]);
+
+  assert.equal(summary, "1 test command(s): 0 passed, 1 failed.");
 });

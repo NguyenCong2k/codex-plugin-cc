@@ -87,7 +87,7 @@ export function summarizeTests(commandsRun) {
   if (tests.length === 0) {
     return "No test commands detected.";
   }
-  const failed = tests.filter((entry) => entry.status === "failed" || (entry.exitCode !== null && entry.exitCode !== 0));
+  const failed = tests.filter((entry) => commandFailed(entry));
   return `${tests.length} test command(s): ${tests.length - failed.length} passed, ${failed.length} failed.`;
 }
 
