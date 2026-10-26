@@ -185,6 +185,23 @@ test("--incident-log reaches the owned runtime environment", () => {
   assert.equal(state.guardianIncidentLog, path.resolve(incidentLog));
 });
 
+test("--worktree works with full access even without an explicit --write", () => {
+  const repo = makeRepo();
+  const bin = makeTempDir();
+  const branch = "fix/full-access-worktree";
+  installFakeCodex(bin, "write-file");
+
+  const result = runTask(repo, bin, ["--full-access", "--worktree", branch, "--digest", "create hello.txt in a worktree"]);
+  const digest = parseDigest(result);
+
+  assert.equal(digest.status, "passed");
+  assert.ok(digest.worktree, "digest must include the worktree path");
+  assert.ok(fs.existsSync(path.join(digest.worktree, "hello.txt")), "Codex must write inside the worktree");
+  const state = readFakeState(bin);
+  assert.equal(state.lastThreadStart.sandbox, "danger-full-access");
+  assert.equal(state.lastTurnStart.approvalPolicy, "never");
+});
+
 test("workspace-write keeps git metadata writable for a linked worktree", () => {
   const repo = makeRepo();
   const bin = makeTempDir();

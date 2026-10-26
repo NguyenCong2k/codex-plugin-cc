@@ -950,12 +950,12 @@ async function handleTask(argv) {
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
-  const write = Boolean(options.write);
   const fullAccess = resolveFullAccess({ flag: Boolean(options["full-access"]), cwd: workspaceRoot });
+  const write = Boolean(options.write) || fullAccess.enabled;
   const incidentLog = resolveIncidentLog({ flag: options["incident-log"], cwd: workspaceRoot }).path;
   const worktreeBranch = options.worktree ? String(options.worktree) : null;
   if (worktreeBranch && !write) {
-    throw new Error("--worktree requires --write because it isolates a code-changing job.");
+    throw new Error("--worktree requires --write or --full-access because it isolates a code-changing job.");
   }
   const worktree = worktreeBranch ? createJobWorktree(workspaceRoot, worktreeBranch) : null;
   const executionCwd = worktree?.path ?? cwd;
