@@ -9,7 +9,9 @@ Baseline: upstream `db52e28` (1.0.6). Fork: NguyenCong2k/codex-plugin-cc, branch
 - Job state transitions and configuration changes are interprocess transactions. Readers see complete JSON; active jobs are not history eligible for pruning. Terminal state cannot be overwritten by late progress or cancellation races.
 - Cancellation is a persisted request consumed by the owning worker, rather than killing an arbitrary PID read from disk. A worker supervises its owned child and records a terminal outcome.
 - Prompt text and options are separate transports. Only an explicit raw slash-arguments option is tokenized. Task text is never parsed as runtime flags.
-- Headless runs honor configuration but never fabricate interactive consent. Approval and elicitation requests are persisted to the owning job, answered through the response command/agent bridge, and delivered back to the same JSON-RPC request.
+- Full access is opt-in only: `--full-access` or `userConfig.full_access=true` maps to Codex `danger-full-access` plus `approvalPolicy=never`. The default remains read-only, or `workspace-write` with `--write`.
+- Every job stores a compact digest (`status`, `filesChanged`, `commandsRun`, `testsSummary`, `failures`, `logPath`, optional `worktree` and `findings`). `--worktree <branch>` isolates code jobs, and `--incident-log <path>` records approvals, command failures, timeouts and killed runtimes.
+- Headless runs honor configuration but never fabricate interactive consent. Approval and elicitation requests are persisted to the owning job, answered through the response command/agent bridge, and delivered back to the same JSON-RPC request. Unanswered requests end as a `blocked` digest with the blocked command.
 
 ## Audit coverage
 
@@ -39,7 +41,7 @@ State intentionally moved away from temporary or ambient plugin data roots. Old 
 
 ## Verification boundaries
 
-Windows Node 25.8.0: full fixture suite, concurrency tests and build. Typecheck covers all plugin runtime JavaScript. A real Codex CLI 0.161.0 initialized, answered `config/read`, and its owned guardian exited after close; no model turn was invoked for this smoke check.
+Windows Node 25.8.0: full fixture suite, concurrency tests and build. Typecheck covers all plugin runtime JavaScript. A real Codex CLI 0.164.0 full-access job created `hello.txt` in an isolated worktree (`smoke/hello-é`), ran `git status --short`, and returned a compact digest with `status=passed` and `filesChanged=["hello.txt"]`; the deterministic suite also covers the fake approval, failure and timeout paths.
 
 The first committed revision passed 107 local tests and both Ubuntu CI targets. A subsequent transport revision uses quoted stdin for slash commands; its shell-expansion regression runs on POSIX and is explicitly skipped on native Windows.
 
