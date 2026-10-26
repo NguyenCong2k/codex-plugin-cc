@@ -8,6 +8,9 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
 
+import { appendIncident } from "./incidents.mjs";
+import { describeApprovalRequest } from "./interaction.mjs";
+
 const manifest = JSON.parse(fs.readFileSync(new URL("../../.claude-plugin/plugin.json", import.meta.url), "utf8"));
 const capabilities = { experimentalApi: true, mcpServerOpenaiFormElicitation: true, requestAttestation: false,
   optOutNotificationMethods: ["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded", "item/reasoning/textDelta"] };
@@ -35,8 +38,12 @@ export class CodexAppServerClient {
   }
   setNotificationHandler(handler) { this.notificationHandler = handler; }
   async initialize() {
+    const baseEnv = this.options.env ?? process.env;
+    const childEnv = this.options.incidentLog
+      ? { ...baseEnv, CODEX_COMPANION_INCIDENT_LOG: this.options.incidentLog }
+      : baseEnv;
     this.proc = spawn(process.execPath, [fileURLToPath(new URL("../app-server-guardian.mjs", import.meta.url))], {
-      cwd: this.cwd, env: this.options.env ?? process.env,
+      cwd: this.cwd, env: childEnv,
       stdio: ["pipe", "pipe", "pipe"], shell: false,
       // EOF on the parent-owned pipe reaps the isolated group even if the
       // companion is killed by a host timeout or SIGKILL.
@@ -82,10 +89,14 @@ export class CodexAppServerClient {
     if (typeof handler !== "function") {
       // A noninteractive client must not manufacture approval or credentials.
       // Surface the requirement and preserve the thread for interactive resume.
-      const detail = `Codex requested ${message.method}, which needs interactive input. Resume this thread in Codex to provide approval or input.`;
+      const approval = describeApprovalRequest(message);
+      const detail = approval.command
+        ? `Codex requested ${message.method} for command: ${approval.command}. This client cannot answer it; resume this thread in Codex to provide approval or input.`
+        : `Codex requested ${message.method}, which needs interactive input. Resume this thread in Codex to provide approval or input.`;
+      const error = Object.assign(new Error(detail), { code: "CODEX_APPROVAL_REQUIRED", approval });
       try { this.sendMessage({ id: message.id, error: { code: -32005, message: detail } }); }
-      catch (error) { this.handleExit(error); return; }
-      this.handleExit(new Error(detail));
+      catch (sendError) { this.handleExit(sendError); return; }
+      this.handleExit(error);
       return;
     }
 
@@ -101,7 +112,8 @@ export class CodexAppServerClient {
         try { if (!this.closed && !this.exitResolved) this.sendMessage({ id: message.id, error: { code, message: detail } }); }
         catch (sendError) { this.handleExit(sendError); return; }
         // A rejected interaction cannot be safely replayed or silently accepted.
-        this.handleExit(Object.assign(new Error(detail), { rpcCode: code }));
+        const exitError = error instanceof Error ? error : new Error(detail);
+        this.handleExit(Object.assign(exitError, { rpcCode: code }));
       });
   }
   handleLine(line) {
@@ -142,6 +154,14 @@ export class CodexAppServerClient {
         this.proc.once("exit", () => { clearTimeout(timer); resolve(undefined); });
       });
       if (this.proc.exitCode === null && this.proc.signalCode === null) {
+        appendIncident({
+          logPath: this.options.incidentLog ?? (this.options.env ?? process.env).CODEX_COMPANION_INCIDENT_LOG,
+          type: "killed_process",
+          task: "Codex app-server cleanup",
+          did: `Killed Codex app-server pid ${this.proc.pid} with SIGKILL after it missed the five-second cleanup deadline.`,
+          result: "The guardian did not finish cleanup in time.",
+          resolution: "Killed the owned runtime so the job cannot leak a process."
+        });
         this.proc.kill("SIGKILL");
         throw new Error("Codex guardian did not finish cleanup within five seconds.");
       }

@@ -41,7 +41,8 @@ import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
 import { CodexAppServerClient, durationSetting } from "./app-server.mjs";
-import { waitForInteractionResponse } from "./interaction.mjs";
+import { appendIncident } from "./incidents.mjs";
+import { autoApprovalResponse, describeApprovalRequest, waitForInteractionResponse } from "./interaction.mjs";
 import { binaryAvailable } from "./process.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
@@ -88,6 +89,16 @@ function buildResumeParams(threadId, cwd, options = {}) {
 /** @returns {UserInput[]} */
 function buildTurnInput(prompt) {
   return [{ type: "text", text: prompt, text_elements: [] }];
+}
+
+function buildSandboxPolicy(cwd, sandbox) {
+  if (sandbox === "danger-full-access") {
+    return { type: "dangerFullAccess" };
+  }
+  if (sandbox === "workspace-write") {
+    return { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
+  }
+  return { type: "readOnly", networkAccess: false };
 }
 
 function shorten(text, limit = 72) {
@@ -731,6 +742,41 @@ export async function captureTurn(client, threadId, startRequest, options = {}) 
 function buildServerRequestHandler(cwd, options = {}) {
   if (!options.jobId || !options.workspaceRoot) return undefined;
   return async message => {
+    const approval = describeApprovalRequest(message);
+    const incident = {
+      logPath: options.incidentLog ?? process.env.CODEX_COMPANION_INCIDENT_LOG ?? null,
+      type: "blocked",
+      task: options.incidentTask ?? "Codex task",
+      did: approval.command
+        ? `Codex requested ${message.method} for: ${approval.command}`
+        : `Codex requested ${message.method}.`,
+      result: approval.reason ? `Reason: ${approval.reason}` : `Approval kind: ${approval.kind}.`,
+      resolution: "Waiting for /codex:respond.",
+      suggestion: "Use --full-access for an explicit no-approval job."
+    };
+
+    if (options.fullAccess) {
+      const response = autoApprovalResponse(message);
+      if (response) {
+        appendIncident({
+          ...incident,
+          type: "other",
+          did: `${approval.method} (${approval.kind})`,
+          resolution: "Auto-accepted because full_access is enabled; no user confirmation was requested."
+        });
+        return response;
+      }
+      const detail = `Full access could not answer ${message.method}: this request needs explicit content, not a blanket approval. Resume the saved thread in Codex to provide input.`;
+      appendIncident({
+        ...incident,
+        type: "blocked",
+        result: detail,
+        resolution: "Job stopped with a blocked digest; no fabricated response was sent."
+      });
+      throw Object.assign(new Error(detail), { code: "CODEX_APPROVAL_REQUIRED", approval });
+    }
+
+    appendIncident(incident);
     options.activity?.pause();
     try {
       return await waitForInteractionResponse({
@@ -738,8 +784,16 @@ function buildServerRequestHandler(cwd, options = {}) {
         jobId: options.jobId,
         message,
         signal: options.signal,
-        timeoutMs: options.interactionTimeoutMs,
+        timeoutMs: options.interactionTimeoutMs ?? (Number(process.env.CODEX_COMPANION_INTERACTION_TIMEOUT_MS) || undefined),
         onProgress: options.onProgress
+      });
+    } catch (error) {
+      if (error?.code === "JOB_CANCELLED") {
+        throw error;
+      }
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+        code: "CODEX_APPROVAL_REQUIRED",
+        approval
       });
     } finally {
       options.activity?.resume();
@@ -1075,7 +1129,8 @@ export async function runAppServerReview(cwd, options = {}) {
     emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
     const thread = await startThread(client, cwd, {
       model: options.model,
-      sandbox: "read-only",
+      approvalPolicy: options.approvalPolicy ?? null,
+      sandbox: options.sandbox ?? "read-only",
       ephemeral: true,
       threadName: options.threadName
     });
@@ -1173,75 +1228,87 @@ export async function runAppServerTurn(cwd, options = {}) {
     throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
   }
 
-  return withAppServer(cwd, async (client, activity) => {
-    let threadId;
+  try {
+    return await withAppServer(cwd, async (client, activity) => {
+      let threadId;
 
-    if (options.resumeThreadId) {
-      emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
-      const response = await resumeThread(client, options.resumeThreadId, cwd, {
-        model: options.model,
-        sandbox: options.sandbox,
-        ephemeral: false
-      });
-      threadId = response.thread.id;
-    } else {
-      emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
-      const response = await startThread(client, cwd, {
-        model: options.model,
-        sandbox: options.sandbox,
-        ephemeral: options.persistThread ? false : true,
-        threadName: options.persistThread ? options.threadName : options.threadName ?? null
-      });
-      threadId = response.thread.id;
-    }
-
-    emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
-      threadId
-    });
-
-    const prompt = options.prompt?.trim() || options.defaultPrompt || "";
-    if (!prompt) {
-      throw new Error("A prompt is required for this Codex run.");
-    }
-
-    const turnState = await captureTurn(
-      client,
-      threadId,
-      () =>
-        client.request("turn/start", {
-          threadId,
-          input: buildTurnInput(prompt),
-          model: options.model ?? null,
-          effort: options.effort ?? null,
-          outputSchema: options.outputSchema ?? null,
-          sandboxPolicy: options.sandbox === "workspace-write"
-            ? { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
-            : { type: "readOnly", networkAccess: false }
-        }),
-      {
-        onProgress: options.onProgress,
-        signal: options.signal,
-        activity,
-        idleTimeoutMs: options.idleTimeoutMs,
-        hardTimeoutMs: options.hardTimeoutMs,
-        timeoutMs: options.timeoutMs
+      if (options.resumeThreadId) {
+        emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
+        const response = await resumeThread(client, options.resumeThreadId, cwd, {
+          model: options.model,
+          approvalPolicy: options.approvalPolicy ?? null,
+          sandbox: options.sandbox,
+          ephemeral: false
+        });
+        threadId = response.thread.id;
+      } else {
+        emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
+        const response = await startThread(client, cwd, {
+          model: options.model,
+          approvalPolicy: options.approvalPolicy ?? null,
+          sandbox: options.sandbox,
+          ephemeral: options.persistThread ? false : true,
+          threadName: options.persistThread ? options.threadName : options.threadName ?? null
+        });
+        threadId = response.thread.id;
       }
-    );
 
-    return {
-      status: buildResultStatus(turnState),
-      threadId,
-      turnId: turnState.turnId,
-      finalMessage: turnState.lastAgentMessage,
-      reasoningSummary: turnState.reasoningSummary,
-      turn: turnState.finalTurn,
-      error: turnState.error,
-      stderr: cleanCodexStderr(client.stderr),
-      fileChanges: turnState.fileChanges,
-      touchedFiles: collectTouchedFiles(turnState.fileChanges),
-      commandExecutions: turnState.commandExecutions
-    };
-  }, options);
+      emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
+        threadId
+      });
+
+      const prompt = options.prompt?.trim() || options.defaultPrompt || "";
+      if (!prompt) {
+        throw new Error("A prompt is required for this Codex run.");
+      }
+
+      const turnState = await captureTurn(
+        client,
+        threadId,
+        () =>
+          client.request("turn/start", {
+            threadId,
+            input: buildTurnInput(prompt),
+            model: options.model ?? null,
+            effort: options.effort ?? null,
+            approvalPolicy: options.approvalPolicy ?? null,
+            outputSchema: options.outputSchema ?? null,
+            sandboxPolicy: buildSandboxPolicy(cwd, options.sandbox)
+          }),
+        {
+          onProgress: options.onProgress,
+          signal: options.signal,
+          activity,
+          idleTimeoutMs: options.idleTimeoutMs,
+          hardTimeoutMs: options.hardTimeoutMs,
+          timeoutMs: options.timeoutMs
+        }
+      );
+
+      return {
+        status: buildResultStatus(turnState),
+        threadId,
+        turnId: turnState.turnId,
+        finalMessage: turnState.lastAgentMessage,
+        reasoningSummary: turnState.reasoningSummary,
+        turn: turnState.finalTurn,
+        error: turnState.error,
+        stderr: cleanCodexStderr(client.stderr),
+        fileChanges: turnState.fileChanges,
+        touchedFiles: collectTouchedFiles(turnState.fileChanges),
+        commandExecutions: turnState.commandExecutions
+      };
+    }, options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (options.fullAccess && /sandbox|approval|danger|full.access/i.test(message)) {
+      throw new Error(
+        `Full access is not supported by this Codex runtime: ${message}\nUpgrade Codex with \`npm install -g @openai/codex@latest\`, or rerun without --full-access.`,
+        { cause: error }
+      );
+    }
+    throw error;
+  }
 }
 
 export async function findLatestTaskThread(cwd) {

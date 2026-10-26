@@ -21,8 +21,25 @@ import {
     runAppServerTurn
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
+import {
+  buildCheapStatus,
+  buildSingleJobSnapshot,
+  buildStatusSnapshot,
+  readStoredJob,
+  resolveCancelableJob,
+  resolveResultJob,
+  sortJobsNewestFirst
+} from "./lib/job-control.mjs";
+import {
+  buildDigest,
+  buildDigestFromStoredJob,
+  buildErrorDigest,
+  inferRunStatus
+} from "./lib/digest.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { collectReviewContext, ensureGitRepository, getWorkingTreeState, resolveReviewTarget } from "./lib/git.mjs";
+import { appendIncident } from "./lib/incidents.mjs";
+import { resolveFullAccess, resolveIncidentLog } from "./lib/plugin-config.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -36,14 +53,7 @@ import {
   updateJob,
   reconcileJobs
 } from "./lib/state.mjs";
-import {
-  buildSingleJobSnapshot,
-  buildStatusSnapshot,
-  readStoredJob,
-  resolveCancelableJob,
-  resolveResultJob,
-  sortJobsNewestFirst
-} from "./lib/job-control.mjs";
+import { createJobWorktree } from "./lib/worktree.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -79,12 +89,12 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--digest] [--incident-log <path>]",
+      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--digest] [--incident-log <path>] [focus text]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--full-access] [--worktree <branch>] [--incident-log <path>] [--digest] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
-      "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
-      "  node scripts/codex-companion.mjs result [job-id] [--json]",
+      "  node scripts/codex-companion.mjs status [job-id] [--all] [--json|--digest]",
+      "  node scripts/codex-companion.mjs result [job-id] [--json|--digest]",
       "  node scripts/codex-companion.mjs respond <job-id> [--action <accept|acceptForSession|decline|cancel>] [--response-file <json>] [--response-stdin] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
     ].join("\n")
@@ -161,8 +171,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function shorten(text, limit = 96) {
-  const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
+function collectChangedFiles(cwd, touchedFiles = []) {
+  const files = new Set(Array.isArray(touchedFiles) ? touchedFiles : []);
+  try {
+    const state = getWorkingTreeState(cwd);
+    for (const file of [...state.staged, ...state.unstaged, ...state.untracked]) {
+      files.add(file);
+    }
+  } catch {
+    // A full-access job may run outside a git repository; Codex's fileChange
+    // events are then the only evidence available.
+  }
+  return [...files];
+}
+
+function shorten(text, limit = 96) {  const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
   if (!normalized) {
     return "";
   }
@@ -396,6 +419,14 @@ async function executeReviewRun(request) {
       },
       { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
     );
+    const digest = buildDigest({
+      status: result.status === 0 ? "passed" : "error",
+      threadId: result.threadId,
+      turnId: result.turnId,
+      summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
+      failureTexts: result.error?.message ?? result.stderr,
+      worktree: request.worktreePath ?? null
+    });
 
     return {
       exitStatus: result.status,
@@ -403,6 +434,7 @@ async function executeReviewRun(request) {
       turnId: result.turnId,
       payload,
       rendered,
+      digest,
       summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
       jobTitle: `Codex ${reviewName}`,
       jobClass: "review",
@@ -411,15 +443,20 @@ async function executeReviewRun(request) {
   }
 
   const context = collectReviewContext(request.cwd, target);
-  const prompt = buildAdversarialReviewPrompt(context, focusText);
+  const prompt = reviewName === "Review"
+    ? buildReviewDigestPrompt(context, focusText)
+    : buildAdversarialReviewPrompt(context, focusText);
   const result = await runAppServerTurn(context.repoRoot, {
     prompt,
     model: request.model,
     sandbox: "read-only",
+    approvalPolicy: null,
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     onProgress: request.onProgress,
+    signal: request.signal,
     jobId: request.jobId,
-    workspaceRoot: request.workspaceRoot ?? resolveWorkspaceRoot(context.repoRoot)
+    workspaceRoot: request.workspaceRoot ?? resolveWorkspaceRoot(context.repoRoot),
+    incidentLog: request.incidentLog
   });
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
@@ -488,13 +525,17 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  const result = await runAppServerTurn(workspaceRoot, {
+  const fullAccess = Boolean(request.fullAccess);
+  const result = await runAppServerTurn(executionCwd, {
     resumeThreadId,
     prompt: request.prompt,
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
     effort: request.effort,
-    sandbox: request.write ? "workspace-write" : "read-only",
+    sandbox: fullAccess ? "danger-full-access" : request.write ? "workspace-write" : "read-only",
+    approvalPolicy: fullAccess ? "never" : null,
+    fullAccess,
+    incidentLog: request.incidentLog ?? null,
     onProgress: request.onProgress,
     signal: request.signal,
     jobId: request.jobId,
@@ -703,8 +744,16 @@ function enqueueBackgroundTask(cwd, job, request) {
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
-  const child = spawnDetachedTaskWorker(cwd, job.id);
-  child.on("error", error => updateJob(job.workspaceRoot, job.id, current => ({ ...current, status: "failed", phase: "failed", errorMessage: error.message, pid: null, completedAt: nowIso() })));
+  const child = spawnDetachedTaskWorker(job.workspaceRoot, job.id);
+  child.on("error", error => updateJob(job.workspaceRoot, job.id, current => ({
+    ...current,
+    status: "failed",
+    phase: "failed",
+    errorMessage: error.message,
+    pid: null,
+    completedAt: nowIso(),
+    digest: buildErrorDigest(error, { jobId: job.id, logPath: logFile, worktree: job.worktreePath ?? null })
+  })));
   updateJob(job.workspaceRoot, job.id, current => ({ ...current, pid: child.pid ?? null }));
 
   return {
@@ -713,7 +762,8 @@ function enqueueBackgroundTask(cwd, job, request) {
       status: "queued",
       title: job.title,
       summary: job.summary,
-      logFile
+      logFile,
+      worktree: job.worktreePath ?? null
     },
     logFile
   };
@@ -721,8 +771,8 @@ function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd"],
-    booleanOptions: ["json", "background", "wait"],
+    valueOptions: ["base", "scope", "model", "cwd", "incident-log"],
+    booleanOptions: ["json", "background", "wait", "digest"],
     aliasMap: {
       m: "model"
     }
@@ -730,6 +780,7 @@ async function handleReviewCommand(argv, config) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
+  const incidentLog = resolveIncidentLog({ flag: options["incident-log"], cwd: workspaceRoot }).path;
   const focusText = positionals.join(" ").trim();
   const target = resolveReviewTarget(cwd, {
     base: options.base,
@@ -744,7 +795,8 @@ async function handleReviewCommand(argv, config) {
     title: metadata.title,
     workspaceRoot,
     jobClass: "review",
-    summary: metadata.summary
+    summary: metadata.summary,
+    incidentLog
   });
   await runForegroundCommand(
     job,
@@ -757,11 +809,13 @@ async function handleReviewCommand(argv, config) {
         model: options.model,
         focusText,
         reviewName: config.reviewName,
+        digest: Boolean(options.digest),
+        incidentLog,
         onProgress: progress,
         jobId: job.id,
         workspaceRoot
       }),
-    { json: options.json }
+    { json: options.json, digest: Boolean(options.digest) }
   );
 }
 
@@ -774,8 +828,8 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "worktree", "incident-log"],
+    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "full-access", "digest", "prompt-stdin"],
     stopAtPositional: true,
     aliasMap: {
       m: "model"
@@ -794,46 +848,70 @@ async function handleTask(argv) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
   const write = Boolean(options.write);
+  const fullAccess = resolveFullAccess({ flag: Boolean(options["full-access"]), cwd: workspaceRoot });
+  const incidentLog = resolveIncidentLog({ flag: options["incident-log"], cwd: workspaceRoot }).path;
+  const worktreeBranch = options.worktree ? String(options.worktree) : null;
+  if (worktreeBranch && !write) {
+    throw new Error("--worktree requires --write because it isolates a code-changing job.");
+  }
+  const worktree = worktreeBranch ? createJobWorktree(workspaceRoot, worktreeBranch) : null;
+  const executionCwd = worktree?.path ?? cwd;
   const taskMetadata = buildTaskRunMetadata({
     prompt,
     resumeLast
   });
+  if (worktree) {
+    taskMetadata.summary = `${taskMetadata.summary} [worktree ${worktree.branch}]`;
+  }
+  const jobOptions = {
+    worktreePath: worktree?.path ?? null,
+    incidentLog,
+    fullAccess: fullAccess.enabled
+  };
 
   if (options.background) {
-    ensureCodexAvailable(cwd);
+    ensureCodexAvailable(executionCwd);
     requireTaskRequest(prompt, resumeLast);
 
-    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+    const job = buildTaskJob(workspaceRoot, taskMetadata, write, jobOptions);
     const request = buildTaskRequest({
-      cwd,
+      cwd: executionCwd,
+      workspaceRoot,
       model,
       effort,
       prompt,
       write,
       resumeLast,
-      jobId: job.id
+      jobId: job.id,
+      fullAccess: fullAccess.enabled,
+      incidentLog,
+      worktreePath: worktree?.path ?? null
     });
-    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    const { payload } = enqueueBackgroundTask(workspaceRoot, job, request);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
     return;
   }
 
-  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+  const job = buildTaskJob(workspaceRoot, taskMetadata, write, jobOptions);
   await runForegroundCommand(
     job,
     (progress, signal) =>
       executeTaskRun({
         signal,
-        cwd,
+        cwd: executionCwd,
+        workspaceRoot,
         model,
         effort,
         prompt,
         write,
         resumeLast,
+        fullAccess: fullAccess.enabled,
+        incidentLog,
+        worktreePath: worktree?.path ?? null,
         jobId: job.id,
         onProgress: progress
       }),
-    { json: options.json }
+    { json: options.json, digest: Boolean(options.digest) }
   );
 }
 

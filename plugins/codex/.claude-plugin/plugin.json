@@ -4,5 +4,19 @@
   "description": "Use Codex from Claude Code to review code or delegate tasks.",
   "author": {
     "name": "OpenAI"
+  },
+  "userConfig": {
+    "full_access": {
+      "type": "boolean",
+      "title": "Full access for Codex jobs",
+      "description": "When true, Codex tasks run with sandbox=danger-full-access and approvalPolicy=never: no confirmation prompts, writes outside the workspace, loopback network and process control. Equivalent to passing --full-access. Default false keeps the current read-only/workspace-write behavior.",
+      "default": false
+    },
+    "incident_log": {
+      "type": "string",
+      "title": "Incident log path",
+      "description": "Optional markdown file. Every blocked approval, failed command, timeout, or killed process appends one entry. Equivalent to --incident-log <path> or CODEX_COMPANION_INCIDENT_LOG.",
+      "default": ""
+    }
   }
 }
