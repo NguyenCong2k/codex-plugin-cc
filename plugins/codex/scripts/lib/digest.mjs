@@ -100,12 +100,19 @@ export function inferRunStatus(exitStatus, commandExecutions = []) {
     return "failed";
   }
   const commandsRun = normalizeCommandExecutions(commandExecutions);
-  const tests = commandsRun.filter((entry) => isTestCommand(entry.command));
-  if (tests.length > 0) {
-    const last = tests[tests.length - 1];
-    return commandFailed(last) ? "failed" : "passed";
+  const unresolvedFailures = new Map();
+  for (const entry of commandsRun) {
+    if (!isTestCommand(entry.command)) {
+      continue;
+    }
+    const command = String(entry.command ?? "").trim();
+    if (commandFailed(entry)) {
+      unresolvedFailures.set(command, entry);
+    } else {
+      unresolvedFailures.delete(command);
+    }
   }
-  return "passed";
+  return unresolvedFailures.size > 0 ? "failed" : "passed";
 }
 
 function commandFailures(commandsRun) {
