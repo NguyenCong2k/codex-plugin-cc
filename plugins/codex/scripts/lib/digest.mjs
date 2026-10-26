@@ -9,6 +9,32 @@ const MAX_TEXT = 4000;
 export const TEST_COMMAND_PATTERN =
   /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i;
 
+const REDACTED = "[REDACTED]";
+/** @type {Array<[RegExp, string]>} */
+const SECRET_PATTERNS = [
+  // Credentials embedded in a URL: https://user:password@host
+  [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)([^\s/@]+)(@)/gi, `$1${REDACTED}$3`],
+  // Authorization headers, including quoted curl -H arguments.
+  [/(\bauthorization\s*:\s*)(?:(?:bearer|basic|token)\s+)?([^\s"',;]+)/gi, `$1${REDACTED}`],
+  [/\b(bearer\s+)([A-Za-z0-9._~+/=-]{8,})/gi, `$1${REDACTED}`],
+  [/(\b(?:x-api-key|api-key)\s*:\s*)([^\s"',;]+)/gi, `$1${REDACTED}`],
+  [/(\bcookie\s*:\s*)([^\r\n]+)/gi, `$1${REDACTED}`],
+  // Command-line credential flags: --token=..., --password ..., --auth-token ...
+  [/(--?(?:auth[-_]?token|token|password|passwd|api[-_]?key|apikey|access[-_]?token|client[-_]?secret|secret)(?:=|\s+))([^\s"'`]+)/gi, `$1${REDACTED}`],
+  // Environment assignments such as OPENAI_API_KEY=...
+  [/\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|CREDENTIALS?)[A-Z0-9_]*\s*=\s*)([^\s"'`]+)/g, `$1${REDACTED}`],
+  // Well-known token shapes without a label.
+  [/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b/g, REDACTED]
+];
+
+export function redactSecrets(value) {
+  let text = String(value ?? "");
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    text = text.replace(pattern, replacement);
+  }
+  return text;
+}
+
 export function isTestCommand(command) {
   return TEST_COMMAND_PATTERN.test(String(command ?? ""));
 }
@@ -70,10 +96,10 @@ export function normalizeCommandExecutions(commandExecutions = []) {
       continue;
     }
     commands.push({
-      command: clipText(item.command ?? "", 1000),
+      command: clipText(redactSecrets(item.command ?? ""), 1000),
       exitCode: Number.isInteger(item.exitCode) ? item.exitCode : null,
       status: typeof item.status === "string" ? item.status : null,
-      output: clipText(item.aggregatedOutput ?? item.output ?? "")
+      output: clipText(redactSecrets(item.aggregatedOutput ?? item.output ?? ""))
     });
     if (commands.length >= MAX_COMMANDS) {
       break;
@@ -195,10 +221,15 @@ export function digestStateForJobStatus(status) {
 
 export function buildDigest(options = {}) {
   const commandsRun = normalizeCommandExecutions(options.commandExecutions ?? []);
+  const failureTexts = Array.isArray(options.failureTexts)
+    ? options.failureTexts
+    : options.failureTexts
+      ? [options.failureTexts]
+      : [];
   const failures = truncateFailureLines([
     ...commandFailures(commandsRun),
-    ...(Array.isArray(options.failureTexts) ? options.failureTexts : options.failureTexts ? [options.failureTexts] : []),
-    options.errorText ?? ""
+    ...failureTexts.map((text) => redactSecrets(text)),
+    redactSecrets(options.errorText ?? "")
   ]);
   const digest = {
     status: normalizeDigestStatus(options.status),
@@ -216,10 +247,10 @@ export function buildDigest(options = {}) {
     digest.findings = normalizeFindings(options.findings);
   }
   if (options.blockedCommand) {
-    digest.blockedCommand = options.blockedCommand;
+    digest.blockedCommand = redactSecrets(options.blockedCommand);
   }
   if (options.blockedReason) {
-    digest.blockedReason = options.blockedReason;
+    digest.blockedReason = redactSecrets(options.blockedReason);
   }
   if (options.summary) {
     digest.summary = twoSentences(options.summary);
