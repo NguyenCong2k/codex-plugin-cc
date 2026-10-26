@@ -16,6 +16,7 @@ const readline = require("node:readline");
 	const STATE_PATH = ${JSON.stringify(statePath)};
 	const BEHAVIOR = ${JSON.stringify(behavior)};
 	const interruptibleTurns = new Map();
+	const pendingServerRequests = new Map();
 
 	function loadState() {
 	  if (!fs.existsSync(STATE_PATH)) {
@@ -191,7 +192,7 @@ function nativeReviewText(target) {
 }
 
 function structuredReviewPayload(prompt) {
-  if (prompt.includes("adversarial software review")) {
+  if (prompt.includes("adversarial software review") || prompt.includes("focused software review")) {
     if (BEHAVIOR === "adversarial-clean") {
       return JSON.stringify({
         verdict: "approve",
@@ -284,6 +285,28 @@ rl.on("line", (line) => {
   const message = JSON.parse(line);
   const state = loadState();
 
+  if (message.id !== undefined && !message.method) {
+    const pending = pendingServerRequests.get(message.id);
+    if (!pending) {
+      return;
+    }
+    pendingServerRequests.delete(message.id);
+    if (message.error) {
+      send({ method: "turn/completed", params: { threadId: pending.threadId, turn: buildTurn(pending.turnId, "failed", { message: message.error.message }) } });
+      return;
+    }
+    send({
+      method: "item/completed",
+      params: {
+        threadId: pending.threadId,
+        turnId: pending.turnId,
+        item: { type: "agentMessage", id: "msg_" + pending.turnId, text: "Approval accepted.", phase: "final_answer" }
+      }
+    });
+    send({ method: "turn/completed", params: { threadId: pending.threadId, turn: buildTurn(pending.turnId, "completed") } });
+    return;
+  }
+
   try {
     switch (message.method) {
       case "initialize":
@@ -310,9 +333,20 @@ rl.on("line", (line) => {
         if (BEHAVIOR === "auth-run-fails") {
           throw new Error("authentication expired; run codex login");
         }
+        if (BEHAVIOR === "full-access-unsupported" && message.params.sandbox === "danger-full-access") {
+          throw new Error("sandbox mode danger-full-access is not supported by this fake runtime");
+        }
         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
           throw new Error("thread/start.persistFullHistory requires experimentalApi capability");
         }
+        state.lastThreadStart = {
+          model: message.params.model ?? null,
+          approvalPolicy: message.params.approvalPolicy ?? null,
+          sandbox: message.params.sandbox ?? null,
+          cwd: message.params.cwd ?? null,
+          ephemeral: message.params.ephemeral ?? null
+        };
+        saveState(state);
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
         send({ method: "thread/started", params: { thread: { id: thread.id } } });
@@ -345,6 +379,13 @@ rl.on("line", (line) => {
         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
           throw new Error("thread/resume.persistFullHistory requires experimentalApi capability");
         }
+        state.lastThreadResume = {
+          threadId: message.params.threadId,
+          model: message.params.model ?? null,
+          approvalPolicy: message.params.approvalPolicy ?? null,
+          sandbox: message.params.sandbox ?? null
+        };
+        saveState(state);
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
         saveState(state);
@@ -450,6 +491,9 @@ rl.on("line", (line) => {
 	          turnId,
 	          model: message.params.model ?? null,
 	          effort: message.params.effort ?? null,
+	          approvalPolicy: message.params.approvalPolicy ?? null,
+	          sandboxPolicy: message.params.sandboxPolicy ?? null,
+	          cwd: thread.cwd ?? null,
 	          prompt
 	        };
 	        saveState(state);
@@ -458,6 +502,82 @@ rl.on("line", (line) => {
         const payload = message.params.outputSchema && message.params.outputSchema.properties && message.params.outputSchema.properties.verdict
           ? structuredReviewPayload(prompt)
           : taskPayload(prompt, thread.name && thread.name.startsWith("Codex Companion Task") && prompt.includes("Continue from the current thread state"));
+
+        if (BEHAVIOR === "approval-request") {
+          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+          const requestId = "approval_" + turnId;
+          pendingServerRequests.set(requestId, { threadId: thread.id, turnId });
+          send({
+            id: requestId,
+            method: "item/commandExecution/requestApproval",
+            params: {
+              kind: "command",
+              threadId: thread.id,
+              turnId,
+              itemId: "item_" + turnId,
+              startedAtMs: Date.now(),
+              command: "git status && npm test -- --runInBand",
+              cwd: thread.cwd,
+              reason: "Fake runtime approval request."
+            }
+          });
+          break;
+        }
+
+        if (BEHAVIOR === "write-file") {
+          const target = path.join(thread.cwd, "hello.txt");
+          fs.writeFileSync(target, "hello from fake codex\\n");
+          emitTurnCompleted(thread.id, turnId, [
+            {
+              completed: {
+                type: "fileChange",
+                id: "fc_" + turnId,
+                changes: [{ path: "hello.txt", kind: { type: "add" } }],
+                status: "completed"
+              }
+            },
+            {
+              completed: { type: "agentMessage", id: "msg_" + turnId, text: "Created hello.txt.", phase: "final_answer" }
+            }
+          ]);
+          break;
+        }
+
+        if (BEHAVIOR === "command-failure") {
+          emitTurnCompleted(thread.id, turnId, [
+            {
+              completed: {
+                type: "commandExecution",
+                id: "cmd_ok_" + turnId,
+                command: "git status",
+                cwd: thread.cwd,
+                status: "completed",
+                exitCode: 0,
+                aggregatedOutput: "On branch main"
+              }
+            },
+            {
+              completed: {
+                type: "commandExecution",
+                id: "cmd_fail_" + turnId,
+                command: "npm test",
+                cwd: thread.cwd,
+                status: "failed",
+                exitCode: 1,
+                aggregatedOutput: "FAIL src/app.test.js\\n  Expected 1 to equal 2\\n  at Object.<anonymous> (src/app.test.js:4:5)"
+              }
+            },
+            {
+              completed: {
+                type: "agentMessage",
+                id: "msg_" + turnId,
+                text: "Tests failed; inspect the digest.",
+                phase: "final_answer"
+              }
+            }
+          ]);
+          break;
+        }
 
         if (
           BEHAVIOR === "with-subagent" ||
