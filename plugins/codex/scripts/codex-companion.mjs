@@ -628,7 +628,7 @@ async function executeTaskRun(request) {
     if (execution?.status === "failed" || execution?.status === "declined" || (Number.isInteger(execution?.exitCode) && execution.exitCode !== 0)) {
       appendIncident({
         logPath: request.incidentLog ?? null,
-        type: "command_failure",
+        type: "other",
         task: taskMetadata.title,
         did: execution.command ?? "Codex command",
         result: execution.aggregatedOutput || `exit ${execution.exitCode ?? "unknown"}`,

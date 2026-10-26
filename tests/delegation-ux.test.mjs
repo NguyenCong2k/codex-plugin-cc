@@ -397,6 +397,21 @@ test("full access fails clearly when the runtime rejects danger-full-access", ()
   assert.match(result.stderr, /danger-full-access/);
 });
 
+test("a command failure uses a standard incident type", () => {
+  const repo = makeRepo();
+  const bin = makeTempDir();
+  const incidentLog = path.join(repo, "command-incidents.md");
+  installFakeCodex(bin, "command-failure");
+
+  const result = runTask(repo, bin, ["--digest", "--incident-log", incidentLog, "run the failing test"]);
+  assert.equal(result.status, 0, result.stderr);
+
+  const incident = fs.readFileSync(incidentLog, "utf8");
+  assert.match(incident, /Loại: other/);
+  assert.doesNotMatch(incident, /Loại: (timeout|command_failure)/);
+  assert.match(incident, /npm test/);
+});
+
 test("a turn timeout appends an incident entry and keeps an error digest", () => {
   const repo = makeRepo();
   const bin = makeTempDir();
@@ -417,6 +432,8 @@ test("a turn timeout appends an incident entry and keeps an error digest", () =>
   assert.match(digest.failures.join("\n"), /hard runtime limit|timed out/i);
 
   const incident = fs.readFileSync(incidentLog, "utf8");
-  assert.match(incident, /Loại: timeout/);
+  assert.match(incident, /Loại: blocked/);
+  assert.match(incident, /timeout/i);
+  assert.doesNotMatch(incident, /Loại: timeout/);
   assert.match(incident, /automatic restart is disabled|no automatic restart/i);
 });

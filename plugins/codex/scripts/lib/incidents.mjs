@@ -16,8 +16,6 @@ const INCIDENT_TYPES = new Set([
   "false_report",
   "env_tampering",
   "killed_process",
-  "timeout",
-  "command_failure",
   "other"
 ]);
 

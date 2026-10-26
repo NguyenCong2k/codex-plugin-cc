@@ -222,7 +222,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     if (timedOut) {
       appendIncident({
         logPath: job.incidentLog ?? null,
-        type: "timeout",
+        type: "blocked",
         task: job.title ?? "Codex job",
         did: `Codex turn ${error.timeout?.kind ?? "runtime"} timeout for job ${job.id}.`,
         result: error.message,
