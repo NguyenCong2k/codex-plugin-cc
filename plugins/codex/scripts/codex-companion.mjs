@@ -1027,7 +1027,7 @@ async function handleTransfer(argv) {
 
 async function handleTaskWorker(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "job-id"]
+    valueOptions: ["cwd", "job-id", "workspace-root"]
   });
 
   if (!options["job-id"]) {
@@ -1035,7 +1035,9 @@ async function handleTaskWorker(argv) {
   }
 
   const cwd = resolveCommandCwd(options);
-  const workspaceRoot = resolveCommandWorkspace(options);
+  const workspaceRoot = options["workspace-root"]
+    ? path.resolve(cwd, options["workspace-root"])
+    : resolveCommandWorkspace(options);
   const storedJob = readStoredJob(workspaceRoot, options["job-id"]);
   if (!storedJob) {
     throw new Error(`No stored job found for ${options["job-id"]}.`);
