@@ -202,6 +202,21 @@ test("--worktree works with full access even without an explicit --write", () =>
   assert.equal(state.lastTurnStart.approvalPolicy, "never");
 });
 
+test("worktree digest reports files committed by Codex inside the worktree", () => {
+  const repo = makeRepo();
+  const bin = makeTempDir();
+  const branch = "feat/committed-change";
+  installFakeCodex(bin, "commit-file");
+
+  const result = runTask(repo, bin, ["--write", "--worktree", branch, "--digest", "commit hello.txt"]);
+  const digest = parseDigest(result);
+
+  assert.equal(digest.status, "passed");
+  assert.match(digest.filesChanged.join("\n"), /hello\.txt/);
+  assert.equal(run("git", ["status", "--porcelain"], { cwd: digest.worktree }).stdout.trim(), "");
+  assert.match(run("git", ["log", "-1", "--oneline"], { cwd: digest.worktree }).stdout, /fake commit/);
+});
+
 test("workspace-write keeps git metadata writable for a linked worktree", () => {
   const repo = makeRepo();
   const bin = makeTempDir();

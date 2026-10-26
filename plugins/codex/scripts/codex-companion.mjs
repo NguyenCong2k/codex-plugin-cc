@@ -37,7 +37,7 @@ import {
   inferRunStatus
 } from "./lib/digest.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, getWorkingTreeState, resolveReviewTarget } from "./lib/git.mjs";
+import { collectReviewContext, ensureGitRepository, getChangedFilesSince, getHeadCommit, getWorkingTreeState, resolveReviewTarget } from "./lib/git.mjs";
 import { appendIncident } from "./lib/incidents.mjs";
 import { resolveFullAccess, resolveIncidentLog } from "./lib/plugin-config.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
@@ -171,11 +171,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function collectChangedFiles(cwd, touchedFiles = []) {
+function collectChangedFiles(cwd, touchedFiles = [], options = {}) {
   const files = new Set(Array.isArray(touchedFiles) ? touchedFiles : []);
   try {
     const state = getWorkingTreeState(cwd);
     for (const file of [...state.staged, ...state.unstaged, ...state.untracked]) {
+      files.add(file);
+    }
+    // A Codex turn can commit through the shell, which produces no native
+    // fileChange event and leaves the working tree clean. Diff against the
+    // HEAD captured when the job started to keep committed work visible.
+    for (const file of getChangedFilesSince(cwd, options.baseRef)) {
       files.add(file);
     }
   } catch {
@@ -603,7 +609,7 @@ async function executeTaskRun(request) {
     status: inferRunStatus(result.status, result.commandExecutions),
     threadId: result.threadId,
     turnId: result.turnId,
-    filesChanged: collectChangedFiles(executionCwd, result.touchedFiles),
+    filesChanged: collectChangedFiles(executionCwd, result.touchedFiles, { baseRef: request.baseRef ?? null }),
     commandExecutions: result.commandExecutions ?? [],
     errorText: failureMessage,
     worktree: request.worktreePath ?? null
@@ -723,7 +729,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write, options = {}) {
   });
 }
 
-function buildTaskRequest({ cwd, workspaceRoot, model, effort, prompt, write, resumeLast, jobId, fullAccess = false, incidentLog = null, worktreePath = null }) {
+function buildTaskRequest({ cwd, workspaceRoot, model, effort, prompt, write, resumeLast, jobId, fullAccess = false, incidentLog = null, worktreePath = null, baseRef = null }) {
   return {
     cwd,
     workspaceRoot,
@@ -735,7 +741,8 @@ function buildTaskRequest({ cwd, workspaceRoot, model, effort, prompt, write, re
     jobId,
     fullAccess,
     incidentLog,
-    worktreePath
+    worktreePath,
+    baseRef
   };
 }
 
@@ -959,6 +966,7 @@ async function handleTask(argv) {
   }
   const worktree = worktreeBranch ? createJobWorktree(workspaceRoot, worktreeBranch) : null;
   const executionCwd = worktree?.path ?? cwd;
+  const baseRef = getHeadCommit(executionCwd);
   const taskMetadata = buildTaskRunMetadata({
     prompt,
     resumeLast
@@ -988,7 +996,8 @@ async function handleTask(argv) {
       jobId: job.id,
       fullAccess: fullAccess.enabled,
       incidentLog,
-      worktreePath: worktree?.path ?? null
+      worktreePath: worktree?.path ?? null,
+      baseRef
     });
     const { payload } = enqueueBackgroundTask(workspaceRoot, job, request);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
@@ -1011,6 +1020,7 @@ async function handleTask(argv) {
         fullAccess: fullAccess.enabled,
         incidentLog,
         worktreePath: worktree?.path ?? null,
+        baseRef,
         jobId: job.id,
         onProgress: progress
       }),

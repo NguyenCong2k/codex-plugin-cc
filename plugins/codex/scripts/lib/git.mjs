@@ -141,6 +141,23 @@ export function getCurrentBranch(cwd) {
   return gitChecked(cwd, ["branch", "--show-current"]).stdout.trim() || "HEAD";
 }
 
+export function getHeadCommit(cwd) {
+  const result = git(cwd, ["rev-parse", "--verify", "HEAD"]);
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+/**
+ * Files changed from `baseRef` to the current working tree, including commits
+ * made through shell commands. Shell-driven commits do not produce native
+ * fileChange events, so the worktree digest needs this git evidence.
+ */
+export function getChangedFilesSince(cwd, baseRef) {
+  if (!baseRef) {
+    return [];
+  }
+  return gitChecked(cwd, ["diff", "--name-only", "-z", String(baseRef)]).stdout.split("\0").filter(Boolean);
+}
+
 export function getWorkingTreeState(cwd) {
   const staged = gitChecked(cwd, ["diff", "--cached", "--name-only", "-z"]).stdout.split("\0").filter(Boolean);
   const unstaged = gitChecked(cwd, ["diff", "--name-only", "-z"]).stdout.split("\0").filter(Boolean);

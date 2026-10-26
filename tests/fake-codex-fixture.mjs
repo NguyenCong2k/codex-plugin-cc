@@ -544,6 +544,19 @@ rl.on("line", (line) => {
           break;
         }
 
+        if (BEHAVIOR === "commit-file") {
+          const { execFileSync } = require("node:child_process");
+          fs.writeFileSync(path.join(thread.cwd, "hello.txt"), "hello from fake codex\\n");
+          execFileSync("git", ["add", "hello.txt"], { cwd: thread.cwd });
+          execFileSync("git", ["commit", "-m", "fake commit"], { cwd: thread.cwd });
+          emitTurnCompleted(thread.id, turnId, [
+            {
+              completed: { type: "agentMessage", id: "msg_" + turnId, text: "Committed hello.txt.", phase: "final_answer" }
+            }
+          ]);
+          break;
+        }
+
         if (BEHAVIOR === "command-failure") {
           emitTurnCompleted(thread.id, turnId, [
             {
