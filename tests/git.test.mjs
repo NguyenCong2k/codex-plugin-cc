@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { collectReviewContext, resolveReviewTarget } from "../plugins/codex/scripts/lib/git.mjs";
-import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+import { initGitRepo, makeTempDir, run, trySymlink } from "./helpers.mjs";
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {
   const cwd = makeTempDir();
@@ -132,13 +132,16 @@ test("collectReviewContext skips untracked directories in working tree review", 
   assert.match(context.content, /### \.claude\/worktrees\/agent-test\/\n\(skipped: directory\)/);
 });
 
-test("collectReviewContext skips broken untracked symlinks instead of crashing", () => {
+test("collectReviewContext skips broken untracked symlinks instead of crashing", (t) => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
   run("git", ["commit", "-m", "init"], { cwd });
-  fs.symlinkSync("missing-target", path.join(cwd, "broken-link"));
+  if (!trySymlink("missing-target", path.join(cwd, "broken-link"))) {
+    t.skip("Windows host policy does not allow creating symlinks.");
+    return;
+  }
 
   const target = resolveReviewTarget(cwd, {});
   const context = collectReviewContext(cwd, target);

@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+import { initGitRepo, makeTempDir, run, trySymlink } from "./helpers.mjs";
 import { setConfig } from "../plugins/codex/scripts/lib/state.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
@@ -44,10 +44,13 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
   assert.equal(payload.sessionRuntime.mode, "direct");
 });
 
-test("setup is ready without npm when Codex is already installed and authenticated", () => {
+test("setup is ready without npm when Codex is already installed and authenticated", (t) => {
   const binDir = makeTempDir();
   installFakeCodex(binDir);
-  fs.symlinkSync(process.execPath, path.join(binDir, "node"));
+  if (!trySymlink(process.execPath, path.join(binDir, "node"))) {
+    t.skip("Windows host policy does not allow creating symlinks.");
+    return;
+  }
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,

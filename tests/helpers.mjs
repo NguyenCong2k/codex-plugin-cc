@@ -17,6 +17,21 @@ export function writeExecutable(filePath, source) {
   fs.writeFileSync(filePath, source, { encoding: "utf8", mode: 0o755 });
 }
 
+// Windows only allows symlink creation with Developer Mode or
+// SeCreateSymbolicLinkPrivilege. Tests that need an actual symlink skip when
+// the host policy denies it; the assertion still runs on capable hosts.
+export function trySymlink(target, linkPath, type = "file") {
+  try {
+    fs.symlinkSync(target, linkPath, type);
+    return true;
+  } catch (error) {
+    if (process.platform === "win32" && ["EPERM", "EACCES", "UNKNOWN"].includes(error.code)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 export function run(command, args, options = {}) {
   let invocation;
   try { invocation = executableInvocation(command, args, options.env ?? process.env); }
