@@ -42,6 +42,17 @@ function existingWorktreeBranch(target) {
   return branch.status === 0 ? branch.stdout.trim() : "";
 }
 
+function worktreeCheckoutState(target) {
+  if (!fs.existsSync(path.join(target, ".git"))) {
+    return { valid: false, branch: "" };
+  }
+  const top = runCommand("git", ["rev-parse", "--show-toplevel"], { cwd: target });
+  if (top.status !== 0 || path.resolve(top.stdout.trim()) !== path.resolve(target)) {
+    return { valid: false, branch: "" };
+  }
+  return { valid: true, branch: existingWorktreeBranch(target) };
+}
+
 /**
  * Create (or reuse) an isolated git worktree for a write-capable job. The
  * branch name and path are passed as argv, never through a shell, so spaces,
@@ -54,11 +65,18 @@ export function createJobWorktree(repoRoot, branch, options = {}) {
   const target = worktreePathFor(root, name, options);
 
   if (fs.existsSync(target)) {
-    const current = existingWorktreeBranch(target);
-    if (current !== name) {
-      throw new Error(`Worktree path already exists for a different branch: ${target} (current: ${current || "unknown"})`);
+    const checkout = worktreeCheckoutState(target);
+    if (checkout.valid) {
+      if (checkout.branch !== name) {
+        throw new Error(`Worktree path already exists for a different branch: ${target} (current: ${checkout.branch})`);
+      }
+      return { path: target, branch: name, repoRoot: root, created: false };
     }
-    return { path: target, branch: name, repoRoot: root, created: false };
+    // An interrupted `git worktree add` can leave an empty or partial folder.
+    // The path is derived from the branch and token, so it belongs to this job;
+    // remove it and prune any stale metadata before creating the checkout.
+    fs.rmSync(target, { recursive: true, force: true });
+    runCommand("git", ["worktree", "prune"], { cwd: root });
   }
 
   fs.mkdirSync(path.dirname(target), { recursive: true });
