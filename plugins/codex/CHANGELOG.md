@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.1 (maintained fork)
+
+- Allow `workspace-write` jobs in linked worktrees to update the parent repository's git metadata, so `git add` and `git commit` succeed.
+- Pass the configured incident log and environment into the owned app-server runtime; killed-runtime incidents are no longer dropped.
+- Treat `--full-access` (and `userConfig.full_access`) as write-capable when `--worktree` is used.
+- Report failed test commands in the digest even when unrelated commands succeed later; declined test commands count as failed.
+- Create incident logs exclusively so parallel jobs cannot truncate existing entries.
+- Include files committed through shell commands in the task's `filesChanged`.
+- Emit JSON for `task --background --digest` instead of the human-readable launch line.
+- Recover stale worktree directories left by an interrupted checkout.
+- Record incidents with the documented type enum (`blocked`, `other`, ...) instead of `timeout` / `command_failure`.
+- Redact credentials from digest commands, output and failures.
+- Include the job id in task and review execution digests.
+
 ## 1.3.0 (maintained fork)
 
 - Add explicit `--full-access` / `userConfig.full_access` mapping to Codex `danger-full-access` plus `approvalPolicy=never`; keep read-only and workspace-write defaults when off.
