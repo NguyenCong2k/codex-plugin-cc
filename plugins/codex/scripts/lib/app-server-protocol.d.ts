@@ -51,6 +51,7 @@ export interface CodexAppServerClientOptions {
   env?: NodeJS.ProcessEnv;
   clientInfo?: ClientInfo;
   capabilities?: InitializeCapabilities;
+  incidentLog?: string | null;
   serverRequestHandler?: (message: { id?: string | number; method?: string; params?: unknown }) => Promise<unknown>;
 }
 

@@ -73,6 +73,34 @@ export function normalizeInteractionRequest(message, options = {}) {
   };
 }
 
+export function describeApprovalRequest(message) {
+  const params = message?.params && typeof message.params === "object" ? message.params : {};
+  return {
+    method: text(message?.method, "unknown"),
+    kind: requestKind(message?.method),
+    requestId: message?.id ?? null,
+    command: text(params.command) || null,
+    cwd: text(params.cwd) || null,
+    reason: text(params.reason) || null,
+    itemId: text(params.itemId) || null
+  };
+}
+
+export function autoApprovalResponse(message) {
+  const kind = requestKind(message?.method);
+  const params = message?.params && typeof message.params === "object" ? message.params : {};
+  if (kind === "command-approval" || kind === "file-change-approval") {
+    return { decision: "accept" };
+  }
+  if (kind === "permissions-approval") {
+    return {
+      permissions: params.permissions ?? params.requestedPermissions ?? {},
+      scope: "turn"
+    };
+  }
+  return null;
+}
+
 export function readPendingInteraction(workspaceRoot, jobId) {
   const jobFile = resolveJobFile(workspaceRoot, jobId);
   if (!fs.existsSync(jobFile)) return null;
