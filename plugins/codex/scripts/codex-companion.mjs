@@ -210,6 +210,8 @@ async function buildSetupReport(cwd, actionsTaken = []) {
   const codexStatus = getCodexAvailability(cwd);
   const authStatus = await getCodexAuthStatus(cwd);
   const config = getConfig(workspaceRoot);
+  const fullAccess = resolveFullAccess({ cwd: workspaceRoot });
+  const incidentLog = resolveIncidentLog({ cwd: workspaceRoot });
 
   const nextSteps = [];
   if (!codexStatus.available) {
@@ -231,6 +233,8 @@ async function buildSetupReport(cwd, actionsTaken = []) {
     auth: authStatus,
     sessionRuntime: getSessionRuntimeStatus(),
     reviewGateEnabled: Boolean(config.stopReviewGate),
+    fullAccess,
+    incidentLog,
     actionsTaken,
     nextSteps
   };
@@ -389,7 +393,8 @@ async function executeReviewRun(request) {
   });
   const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
-  if (reviewName === "Review") {
+  const digestRequested = Boolean(request.digest);
+  if (reviewName === "Review" && !digestRequested) {
     const reviewTarget = validateNativeReviewRequest(target, focusText);
     const result = await runAppServerReview(request.cwd, {
       target: reviewTarget,
@@ -397,7 +402,8 @@ async function executeReviewRun(request) {
       onProgress: request.onProgress,
       signal: request.signal,
       jobId: request.jobId,
-      workspaceRoot: request.workspaceRoot ?? resolveWorkspaceRoot(request.cwd)
+      workspaceRoot: request.workspaceRoot ?? resolveWorkspaceRoot(request.cwd),
+      incidentLog: request.incidentLog
     });
     const payload = {
       review: reviewName,
@@ -558,13 +564,37 @@ async function executeTaskRun(request) {
       write: Boolean(request.write)
     }
   );
+  const digest = buildDigest({
+    status: inferRunStatus(result.status, result.commandExecutions),
+    threadId: result.threadId,
+    turnId: result.turnId,
+    filesChanged: collectChangedFiles(executionCwd, result.touchedFiles),
+    commandExecutions: result.commandExecutions ?? [],
+    errorText: failureMessage,
+    worktree: request.worktreePath ?? null
+  });
   const payload = {
     status: result.status,
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles,
-    reasoningSummary: result.reasoningSummary
+    commandExecutions: result.commandExecutions,
+    reasoningSummary: result.reasoningSummary,
+    digest
   };
+
+  for (const execution of result.commandExecutions ?? []) {
+    if (execution?.status === "failed" || execution?.status === "declined" || (Number.isInteger(execution?.exitCode) && execution.exitCode !== 0)) {
+      appendIncident({
+        logPath: request.incidentLog ?? null,
+        type: "command_failure",
+        task: taskMetadata.title,
+        did: execution.command ?? "Codex command",
+        result: execution.aggregatedOutput || `exit ${execution.exitCode ?? "unknown"}`,
+        resolution: "Kept running; the failure is also reported in the job digest."
+      });
+    }
+  }
 
   return {
     exitStatus: result.status,
@@ -572,6 +602,7 @@ async function executeTaskRun(request) {
     turnId: result.turnId,
     payload,
     rendered,
+    digest,
     summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
     jobTitle: taskMetadata.title,
     jobClass: "task",
@@ -614,7 +645,7 @@ function getJobKindLabel(kind, jobClass) {
   return jobClass === "review" ? "review" : "rescue";
 }
 
-function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summary, write = false }) {
+function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summary, write = false, worktreePath = null, incidentLog = null, fullAccess = false }) {
   return createJobRecord({
     id: generateJobId(prefix),
     kind,
@@ -623,7 +654,10 @@ function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summ
     workspaceRoot,
     jobClass,
     summary,
-    write
+    write,
+    worktreePath,
+    incidentLog,
+    fullAccess
   });
 }
 
@@ -639,7 +673,7 @@ function createTrackedProgress(job, options = {}) {
   };
 }
 
-function buildTaskJob(workspaceRoot, taskMetadata, write) {
+function buildTaskJob(workspaceRoot, taskMetadata, write, options = {}) {
   return createCompanionJob({
     prefix: "task",
     kind: "task",
@@ -647,19 +681,26 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
     workspaceRoot,
     jobClass: "task",
     summary: taskMetadata.summary,
-    write
+    write,
+    worktreePath: options.worktreePath ?? null,
+    incidentLog: options.incidentLog ?? null,
+    fullAccess: Boolean(options.fullAccess)
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
+function buildTaskRequest({ cwd, workspaceRoot, model, effort, prompt, write, resumeLast, jobId, fullAccess = false, incidentLog = null, worktreePath = null }) {
   return {
     cwd,
+    workspaceRoot,
     model,
     effort,
     prompt,
     write,
     resumeLast,
-    jobId
+    jobId,
+    fullAccess,
+    incidentLog,
+    worktreePath
   };
 }
 
@@ -708,20 +749,41 @@ function requireTaskRequest(prompt, resumeLast) {
 async function runForegroundCommand(job, runner, options = {}) {
   const { logFile, progress } = createTrackedProgress(job, {
     logFile: options.logFile,
-    stderr: !options.json
+    stderr: !options.json && !options.digest
   });
-  const execution = await runTrackedJob(job, signal => runner(progress, signal), { logFile });
-  outputResult(options.json ? execution.payload : execution.rendered, options.json);
+  let execution;
+  try {
+    execution = await runTrackedJob(job, signal => runner(progress, signal), { logFile });
+  } catch (error) {
+    const stored = readStoredJob(job.workspaceRoot, job.id) ?? {};
+    const digest = stored.digest ?? buildErrorDigest(error, {
+      jobId: job.id,
+      logPath: logFile,
+      worktree: job.worktreePath ?? null
+    });
+    if (options.digest || error?.code === "CODEX_APPROVAL_REQUIRED" || error?.code === "CODEX_APPROVAL_DENIED") {
+      if (error?.code !== "CODEX_APPROVAL_REQUIRED" && error?.code !== "CODEX_APPROVAL_DENIED") {
+        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      }
+      outputResult(digest, true);
+      process.exitCode = 1;
+      return { exitStatus: 1, payload: stored.result ?? null, rendered: stored.rendered ?? "", digest };
+    }
+    throw error;
+  }
+  const stored = readStoredJob(job.workspaceRoot, job.id) ?? {};
+  const digest = stored.digest ?? execution.digest;
+  outputResult(options.digest ? digest : options.json ? execution.payload : execution.rendered, Boolean(options.json || options.digest));
   if (execution.exitStatus !== 0) {
     process.exitCode = execution.exitStatus;
   }
   return execution;
 }
 
-function spawnDetachedTaskWorker(cwd, jobId) {
+function spawnDetachedTaskWorker(workspaceRoot, jobId) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
-  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
-    cwd,
+  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", workspaceRoot, "--workspace-root", workspaceRoot, "--job-id", jobId], {
+    cwd: workspaceRoot,
     env: process.env,
     detached: true,
     stdio: "ignore",

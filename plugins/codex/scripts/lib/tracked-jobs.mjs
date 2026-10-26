@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import process from "node:process";
 
+import { buildErrorDigest } from "./digest.mjs";
+import { appendIncident } from "./incidents.mjs";
 import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile, updateJob } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
@@ -159,6 +161,14 @@ export async function runTrackedJob(job, runner, options = {}) {
     poll();
     if (controller.signal.aborted) throw controller.signal.reason;
     const execution = await runner(controller.signal);
+    const digest = execution.digest
+      ? {
+          ...execution.digest,
+          jobId: job.id,
+          logPath: running.logFile,
+          worktree: execution.digest.worktree ?? job.worktreePath ?? null
+        }
+      : null;
     let completionStatus;
     updateJob(job.workspaceRoot, job.id, current => {
       completionStatus = current.cancelRequestedAt || controller.signal.reason?.code === "JOB_CANCELLED" ? "cancelled"
@@ -167,7 +177,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       ...current, status: completionStatus, phase: completionStatus === "completed" ? "done" : completionStatus,
       threadId: execution.threadId ?? current.threadId, turnId: execution.turnId ?? current.turnId,
       pid: null, completedAt: nowIso(), result: execution.payload, rendered: execution.rendered,
-      summary: execution.summary, interaction: null, interactions: [],
+      digest, summary: execution.summary, interaction: null, interactions: [],
       errorMessage: completionStatus === "cancelled" ? current.cancelReason || "Cancelled by user." : null
     }); });
     appendLogBlock(running.logFile, "Final output", execution.rendered);
@@ -179,6 +189,13 @@ export async function runTrackedJob(job, runner, options = {}) {
     const terminalStatus = cancelled ? "cancelled" : timedOut ? "timed_out" : "failed";
     const threadId = error.threadId ?? null;
     const turnId = error.turnId ?? null;
+    const digest = buildErrorDigest(error, {
+      jobId: job.id,
+      logPath: running.logFile,
+      worktree: job.worktreePath ?? null,
+      threadId,
+      turnId
+    });
     updateJob(job.workspaceRoot, job.id, current => ({
       ...current,
       status: terminalStatus,
@@ -190,6 +207,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       interaction: null,
       interactions: [],
       errorCode: typeof error?.code === "string" ? error.code : null,
+      digest,
       timeout: timedOut ? { ...error.timeout, automaticRestart: false } : null,
       resume: timedOut && (threadId ?? current.threadId)
         ? {
@@ -201,7 +219,26 @@ export async function runTrackedJob(job, runner, options = {}) {
         : null,
       errorMessage: error instanceof Error ? error.message : String(error)
     }));
-    if (timedOut) appendLogLine(running.logFile, `Timed out (${error.timeout?.kind ?? "turn"}); automatic restart is disabled.`);
+    if (timedOut) {
+      appendIncident({
+        logPath: job.incidentLog ?? null,
+        type: "timeout",
+        task: job.title ?? "Codex job",
+        did: `Codex turn ${error.timeout?.kind ?? "runtime"} timeout for job ${job.id}.`,
+        result: error.message,
+        resolution: "Interrupted the owned runtime and preserved a resumable thread; no automatic restart."
+      });
+      appendLogLine(running.logFile, `Timed out (${error.timeout?.kind ?? "turn"}); automatic restart is disabled.`);
+    } else if (cancelled) {
+      appendIncident({
+        logPath: job.incidentLog ?? null,
+        type: "killed_process",
+        task: job.title ?? "Codex job",
+        did: `Cancelled job ${job.id}; stopped the owned Codex runtime.`,
+        result: error instanceof Error ? error.message : String(error),
+        resolution: "Cancellation acknowledged by the owner; thread state remains resumable."
+      });
+    }
     throw error;
   } finally {
     clearInterval(interval); process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
