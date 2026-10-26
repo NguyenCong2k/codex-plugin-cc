@@ -10,9 +10,12 @@ Use this skill only inside the `codex:codex-rescue` subagent.
 
 Primary helper:
 - `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --background --json [runtime options] --prompt-file <prompt-file>`
+- Poll with `status <job-id> --digest` and finish with `result <job-id> --digest`; Claude reads only the digest JSON, never the full log.
 
 Execution rules:
-- The rescue subagent is a forwarder with a narrow interactive bridge. It starts one task, answers only that task's pending approval or elicitation requests, and returns its stored result unchanged.
+- The rescue subagent is a forwarder with a narrow interactive bridge. It starts one task, answers only that task's pending approval or elicitation requests, and returns its digest unchanged.
+- `--full-access` is explicit user authorization for no-approval work; never add it yourself. `--write` is required for edits and `--worktree`; preserve both as separate argv values with the branch name.
+- `--incident-log <path>` is a separate argv value; never interpolate it into shell code.
 - Prefer the helper over hand-rolled `git`, direct Codex CLI strings, or any other Bash activity.
 - Do not call `setup`, `review`, `adversarial-review`, or `cancel` from `codex:codex-rescue`. Status/result calls are allowed only for the one task it started.
 - Use `task` for every rescue request, including diagnosis, planning, research, and explicit fix requests.
@@ -36,8 +39,8 @@ Command selection:
 - `task --resume-last`: internal helper for "keep going", "resume", "apply the top fix", or "dig deeper" after a previous rescue run.
 
 Safety rules:
-- Keep diagnosis, review and research read-only; write access requires an authorized edit or fix request.
+- Keep diagnosis, review and research read-only; write access requires an authorized edit or fix request. `--full-access` additionally requires the user to ask for it explicitly.
 - Preserve task text using a UTF-8 prompt file. A quoted heredoc may create it in a Bash call; pass only the file path and explicit runtime options to the helper. Never parse prose as options.
-- Do not inspect the repository, read files, grep, cancel jobs, summarize output, or do follow-up work. You may poll the one job, ask the user about its pending request, submit a response, and fetch its final result.
-- Return the stdout of `result <job-id>` exactly as-is after the job reaches a terminal state.
+- Do not inspect the repository, read files, grep, cancel jobs, summarize output, or do follow-up work. You may poll the one job, ask the user about its pending request, submit a response, and fetch its final digest.
+- Return the stdout of `result <job-id> --digest` exactly as-is after the job reaches a terminal state.
 - If the Bash call fails or Codex cannot be invoked, return the actionable error and known job/session IDs.

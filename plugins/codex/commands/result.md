@@ -1,6 +1,6 @@
 ---
 description: Show the stored final output for a finished Codex job in this repository
-argument-hint: '[job-id]'
+argument-hint: '[job-id] [--digest]'
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
@@ -22,3 +22,5 @@ Present the full command output to the user. Do not summarize or condense it. Pr
 - File paths and line numbers exactly as reported
 - Any error messages or parse errors
 - Follow-up commands such as `/codex:status <id>` and `/codex:review`
+
+`--digest` returns only the compact job digest (`status`, `filesChanged`, `commandsRun`, `testsSummary`, `failures`, `logPath`, `worktree`, and review `findings`). Use it when Claude only needs the result summary; use the plain command when the user wants the full stored output.

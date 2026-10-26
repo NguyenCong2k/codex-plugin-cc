@@ -1,6 +1,6 @@
 ---
 description: Show active and recent Codex jobs for this repository, including review-gate status
-argument-hint: '[job-id] [--wait] [--timeout-ms <ms>] [--all]'
+argument-hint: '[job-id] [--wait] [--timeout-ms <ms>] [--all] [--digest]'
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
@@ -24,3 +24,5 @@ If the user did not pass a job ID:
 If the user did pass a job ID:
 - Present the full command output to the user.
 - Do not summarize or condense it.
+
+For cheap polling from another agent, append `--digest`: it returns only `jobId`, `state` (`running|done|failed`), `lastOutputAt`, `pid`, `logPath`, `worktree`, and the pending `interaction` summary. It never prints log content.

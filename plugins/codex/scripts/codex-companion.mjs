@@ -767,7 +767,13 @@ async function executeTransfer(cwd, options = {}) {
 }
 
 function readTaskPrompt(cwd, options, positionals) {
+  if (options["prompt-stdin"]) {
+    return readStdinIfPiped();
+  }
   if (options["prompt-file"]) {
+    if (options["prompt-file"] === "-") {
+      return readStdinIfPiped();
+    }
     return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
   }
 

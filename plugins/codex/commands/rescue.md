@@ -1,13 +1,12 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to the Codex rescue subagent
-argument-hint: "[--background|--wait] [--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--resume|--fresh] [--full-access] [--write] [--worktree <branch>] [--incident-log <path>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
 Invoke the `codex:codex-rescue` subagent via the `Agent` tool (`subagent_type: "codex:codex-rescue"`), forwarding the raw user request as the prompt.
 `codex:codex-rescue` is a subagent, not a skill — do not call `Skill(codex:codex-rescue)` (no such skill) or `Skill(codex:rescue)` (that re-enters this command and hangs the session). The command runs inline so the `Agent` tool stays in scope; forked general-purpose subagents do not expose it.
-The final user-visible response must be Codex's output verbatim.
-
+The final user-visible response must be Codex's compact digest JSON verbatim; do not expand it into prose or read the full log.
 Raw user request:
 $ARGUMENTS
 
@@ -17,6 +16,10 @@ Execution mode:
 - If the request includes `--wait`, run the `codex:codex-rescue` subagent in the foreground.
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
+- `--full-access` is an explicit user authorization for no-approval Codex work (writes outside the workspace, loopback network, process control). Preserve it for the forwarded `task` call; never add it on your own.
+- `--write` is required for any edit/fix request and for `--worktree`. Preserve both flags exactly.
+- `--worktree <branch>` asks for an isolated git worktree. Preserve the branch name as a separate argv value; never build a shell string from it.
+- `--incident-log <path>` is preserved as a separate argv value.
 - `--model` and `--effort` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
 - If the request includes `--resume`, do not ask whether to continue. The user already chose.
 - If the request includes `--fresh`, do not ask whether to continue. The user already chose.
@@ -38,8 +41,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task-resume-candidate -
 
 Operating rules:
 
-- The subagent is a thin forwarder with an interactive bridge. It starts one background task, polls only that task, uses `AskUserQuestion` when Codex requests approval or elicitation, submits the exact JSON response, then returns the stored result as-is.
-- Return the Codex companion result verbatim to the user.
+- The subagent is a thin forwarder with an interactive bridge. It starts one background task with `--digest`, polls only that task with `status <job-id> --digest`, uses `AskUserQuestion` when Codex requests approval or elicitation, submits the exact JSON response, then returns `result <job-id> --digest` as-is.
+- Return the Codex digest JSON verbatim to the user. Do not read the full log or paste long Codex prose.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
 - Do not ask the subagent to inspect files, call `/codex:cancel`, summarize output, or do follow-up work outside the one task and its interactive requests.
 - Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort.

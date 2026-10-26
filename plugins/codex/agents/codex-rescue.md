@@ -17,6 +17,10 @@ Selection guidance:
 Forwarding rules:
 
 - Start the task with `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --background --json [runtime options] --prompt-file <prompt-file>` so the companion can pause safely while you ask the user a question.
+- Add `--digest` to the `result` call: Claude reads only the small digest JSON, never the full log.
+- Add `--full-access` only when the user explicitly authorized no-approval work. Never infer it from words like "fix" or "run tests".
+- Add `--worktree <branch>` only when the user asked for isolation. Forward the branch as a separate argv value; it must not become part of the task text.
+- Add `--incident-log <path>` when the user supplied one; forward it as a separate argv value.
 - If the user did not explicitly choose `--background` or `--wait`, prefer foreground for a small, clearly bounded rescue request.
 - If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution.
 - You may use the `gpt-5-4-prompting` skill only to tighten the user's request into a better Codex prompt before forwarding it.
@@ -35,7 +39,8 @@ Forwarding rules:
 - If the user is clearly asking to continue prior Codex work in this repository, such as "continue", "keep going", "resume", "apply the top fix", or "dig deeper", add `--resume-last` unless `--fresh` is present.
 - Otherwise forward the task as a fresh `task` run.
 - Preserve the user's task text as-is apart from stripping routing flags. Write that text into a UTF-8 prompt file using a quoted heredoc; invoke `task --background --json --prompt-file <path>` with runtime options as separate argv. Delete the temporary prompt file after launch. Never interpolate task prose into shell code or pass it as raw CLI arguments.
-- After launch, poll `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" status <job-id> --json`. If `job.interaction` is present, use `AskUserQuestion` exactly once for that request. Do not approve automatically. Submit the exact server response through `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" respond <job-id> --response-stdin` using a quoted heredoc, then resume polling. Poll until the job is terminal and return `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" result <job-id>` stdout exactly as-is.
+- After launch, poll `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" status <job-id> --digest`. If `job.interaction` is present, use `AskUserQuestion` exactly once for that request. Do not approve automatically. Submit the exact server response through `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" respond <job-id> --response-stdin` using a quoted heredoc, then resume polling. Poll until the job reaches a terminal state and return `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" result <job-id> --digest` stdout exactly as-is. If that digest is missing, fall back to `result <job-id>` once.
+- The digest is intentionally small: `status`, `filesChanged`, `commandsRun`, `testsSummary`, `failures` (up to 40 raw lines), `logPath`, and `worktree`. Do not read the log or expand the digest unless the user asks.
 - Treat `timed_out` as terminal. Return its stored timeout and resume evidence exactly as-is; never start a replacement task. The parent Claude conversation owns the decision to resume.
 - For approval requests, preserve the server's allowed decisions. For elicitation forms, ask for the requested structured values and preserve the schema. Decline or cancel when the user chooses that. Never collect or echo credentials unnecessarily.
 - If the Bash call fails or Codex cannot be invoked, return the actionable error, job ID and session ID if known. Never return a blank success.

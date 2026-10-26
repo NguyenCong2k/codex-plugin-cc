@@ -21,7 +21,27 @@ they already have.
   - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
 - **Node.js 18.18 or later**
 
-## Reliability changes in this fork
+## Delegation contract (digest, full access, worktrees)
+
+Delegated jobs are designed for a thin Claude session:
+
+- **Compact digest.** `task --digest`, `review --digest`, `status <job> --digest`, and `result <job> --digest` return a small JSON object: `status` (`passed|failed|blocked|error`), `filesChanged`, `commandsRun` (command + exit code), `testsSummary`, `failures` (at most 40 raw lines), `logPath`, and the worktree path when one was used. The full log stays on disk; Claude should read only the digest.
+- **Opt-in full access.** Pass `--full-access` (or set the `full_access` userConfig option to `true`) to run Codex with `sandbox=danger-full-access` and `approvalPolicy=never`. That is the explicit mode for writing outside the workspace, loopback network access, running/killing processes, and AutoCAD/MCP work. Without it, tasks keep the existing read-only (or `--write` → `workspace-write`) behavior.
+- **Isolated worktrees.** `task --write --worktree <branch>` creates a git worktree under `.claude/worktrees/` and runs Codex there, so parallel agents cannot overwrite each other. The digest reports the worktree path.
+- **Incident log.** `--incident-log <path>` (or `CODEX_COMPANION_INCIDENT_LOG`) appends one markdown entry whenever Codex asks for approval, a command fails, a turn times out, or the plugin kills a process.
+
+Example:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --background --write \
+  --full-access --worktree fix/loopback --incident-log ./agent-incidents.md \
+  --digest --prompt-file ./task.txt
+# then: status <job-id> --digest  /  result <job-id> --digest
+```
+
+Interactive approvals remain available in normal mode: a job pauses and `/codex:respond <job-id>` supplies the exact decision. If the request cannot be answered, the job ends with a `blocked` digest that includes the blocked command instead of dying without evidence.
+
+### Reliability changes in this fork
 
 Each job owns an app-server supervised by a guardian. A session ending requests cancellation of its own jobs; it cannot terminate another session's runtime. Job records use private storage and atomic interprocess transactions. Active jobs remain available regardless of the history cap, and finished results survive session exit. RPCs and turns have explicit deadlines, with no automatic replay after an uncertain outcome.
 
